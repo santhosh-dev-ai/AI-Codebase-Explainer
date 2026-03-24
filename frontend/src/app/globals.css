@@ -1,0 +1,142 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-inter: 'Inter', system-ui, sans-serif;
+  --font-jetbrains-mono: 'JetBrains Mono', 'Consolas', monospace;
+}
+
+* {
+  box-sizing: border-box;
+  padding:  0;
+  margin: 0;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: auto;
+}
+
+body {
+  @apply bg-background text-text-primary;
+  font-family: var(--font-inter);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-background;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-border rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-text-secondary;
+}
+
+/* Code block styles */
+code {
+  font-family: var(--font-jetbrains-mono);
+  @apply text-sm;
+}
+
+pre {
+  font-family: var(--font-jetbrains-mono);
+  @apply text-sm;
+}
+
+/* Selection styles */
+::selection {
+  @apply bg-accent bg-opacity-30;
+}
+
+/* Focus styles */
+*:focus-visible {
+  @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-background;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes skeleton {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-in;
+}
+
+.animate-slide-in {
+  animation: slideIn 0.3s ease-out;
+}
+
+.animate-skeleton {
+  animation: skeleton 1.5s ease-in-out infinite;
+}
+
+/* Markdown styles */
+.prose {
+  @apply text-text-primary;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  @apply text-text-primary font-semibold;
+}
+
+.prose code {
+  @apply bg-surface px-1 py-0.5 rounded text-accent;
+}
+
+.prose pre {
+  @apply bg-surface p-4 rounded overflow-x-auto;
+}
+
+.prose a {
+  @apply text-accent hover:underline;
+}
+
+.prose strong {
+  @apply font-semibold text-text-primary;
+}
+
+.prose ul,
+.prose ol {
+  @apply ml-6;
+}
