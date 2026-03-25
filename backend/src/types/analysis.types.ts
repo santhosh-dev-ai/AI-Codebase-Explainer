@@ -1,11 +1,50 @@
 export interface ArchitectureOverview {
   summary: string;
+  executiveBullets: string[];
   pattern: string;
   techStack: string[];
   projectType: string;
   framework?: string;
   keyModules: KeyModule[];
   dataFlow: string;
+  deepDive: DeepDiveExplanation;
+  scorecard: AnalysisScorecard;
+  detectedEntryPoints: string[];
+  integrationPoints: string[];
+  risks: AnalysisRisk[];
+  evidence: EvidenceItem[];
+  confidence: number;
+  unknowns: string[];
+}
+
+export interface DeepDiveExplanation {
+  architectureNarrative: string;
+  runtimeFlow: string;
+  dataLifecycle: string;
+  qualitySignals: string;
+  scalabilityAndOps: string;
+  recommendations: string;
+}
+
+export interface AnalysisScorecard {
+  architecture: number;
+  maintainability: number;
+  complexity: number;
+  reliability: number;
+  security: number;
+}
+
+export interface AnalysisRisk {
+  title: string;
+  severity: 'high' | 'medium' | 'low';
+  detail: string;
+  mitigation: string;
+}
+
+export interface EvidenceItem {
+  filePath: string;
+  finding: string;
+  relevance: string;
 }
 
 export interface KeyModule {

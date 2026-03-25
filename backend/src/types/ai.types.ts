@@ -14,7 +14,7 @@ export interface CodeContext {
   lineRange?: { start: number; end: number };
 }
 
-export interface File Reference {
+export interface FileReference {
   path: string;
   lineStart?: number;
   lineEnd?: number;

@@ -4,7 +4,7 @@ export class PromptBuilderService {
     metadata: string,
     sampleFiles: Record<string, string>
   ): string {
-    return `You are an expert software architect. Analyze this codebase and provide a comprehensive overview.
+    return `You are an expert software architect. Analyze this repository and return a highly detailed, accurate, evidence-based overview.
 
 ## Repository Structure:
 ${fileTree}
@@ -14,17 +14,68 @@ ${metadata}
 
 ## Sample Files for Context:
 ${Object.entries(sampleFiles)
-  .map(([path, content]) => `### ${path}\n\`\`\`\n${content.substring(0, 500)}\n\`\`\``)
+  .map(([path, content]) => `### ${path}\n\`\`\`\n${content.substring(0, 700)}\n\`\`\``)
   .join('\n\n')}
 
-Please provide:
-1. **Project Summary**: What does this project do? (2-3 sentences)
-2. **Architecture Pattern**: What architectural pattern is used (MVC, microservices, layered, etc.)?
-3. **Tech Stack**: List the main technologies, frameworks, and libraries used
-4. **Key Modules**: Identify 3-5 key modules/directories and explain their responsibilities
-5. **Data Flow**: Explain how data flows through the application
+Return ONLY valid JSON (no markdown, no prose outside JSON) using this exact schema:
+{
+  "summary": "4-8 sentences with concrete behavior and purpose",
+  "executiveBullets": ["8-12 precise bullets that explain repo intent, boundaries, critical paths, and engineering tradeoffs"],
+  "pattern": "primary architecture pattern",
+  "projectType": "web app|api service|cli|library|data pipeline|other",
+  "framework": "main framework or null",
+  "techStack": ["frameworks, runtimes, key libs, infra"],
+  "detectedEntryPoints": ["concrete files/functions/routes"],
+  "integrationPoints": ["db, queue, cache, third-party APIs, webhooks, external services"],
+  "keyModules": [
+    {
+      "name": "module name",
+      "path": "directory or file path",
+      "responsibility": "what it owns"
+    }
+  ],
+  "dataFlow": "step-by-step flow from inputs to outputs",
+  "deepDive": {
+    "architectureNarrative": "how layers/components are organized and why",
+    "runtimeFlow": "request/event lifecycle through concrete components",
+    "dataLifecycle": "how data is validated/transformed/stored/read",
+    "qualitySignals": "testing, typing, linting, code quality evidence",
+    "scalabilityAndOps": "deployment/runtime constraints, scaling considerations, observability posture",
+    "recommendations": "prioritized actionable improvement roadmap"
+  },
+  "scorecard": {
+    "architecture": 0,
+    "maintainability": 0,
+    "complexity": 0,
+    "reliability": 0,
+    "security": 0
+  },
+  "risks": [
+    {
+      "title": "risk title",
+      "severity": "high|medium|low",
+      "detail": "why this is a risk",
+      "mitigation": "recommended mitigation"
+    }
+  ],
+  "evidence": [
+    {
+      "filePath": "path/to/file",
+      "finding": "specific observation from file",
+      "relevance": "why this supports an architectural claim"
+    }
+  ],
+  "confidence": 0,
+  "unknowns": ["items that cannot be inferred from provided files"]
+}
 
-Keep the response professional and concise. Format using markdown with clear sections.`;
+Rules:
+- Be precise and avoid speculation.
+- If uncertain, include that in unknowns and reduce confidence.
+- Every major architectural claim must be backed by evidence entries.
+- Prefer concrete paths and identifiers over generic language.
+- Scorecard values must be integers from 0 to 100 and aligned with stated evidence/risks.
+- confidence must be an integer from 0 to 100.`;
   }
 
   buildFileExplanationPrompt(

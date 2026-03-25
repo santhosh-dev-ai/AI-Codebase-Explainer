@@ -29,41 +29,33 @@ export function getFileIcon(fileName: string): string {
   const ext = fileName.split('.').pop()?.toLowerCase();
 
   const iconMap: Record<string, string> = {
-    // JavaScript/TypeScript
-    js: '📜',
-    jsx: '⚛️',
-    ts: '📘',
-    tsx: '⚛️',
-    // Web
-    html: '🌐',
-    css: '🎨',
-    scss: '🎨',
-    // Python
-    py: '🐍',
-    // Java
-    java: '☕',
-    // C/C++
-    c: ' 🔧',
-    cpp: '🔧',
-    h: '📋',
-    // Config
-    json: '📋',
-    yaml: '⚙️',
-    yml: '⚙️',
-    xml: '📄',
-    // Docs
-    md: '📝',
-    txt: '📄',
-    // Other
-    sql: '🗄️',
-    sh: '⚡',
-    go: '🐹',
-    rs: '🦀',
-    php: '🐘',
-    rb: '💎',
+    js: 'JS',
+    jsx: 'JSX',
+    ts: 'TS',
+    tsx: 'TSX',
+    html: 'HTML',
+    css: 'CSS',
+    scss: 'SCSS',
+    py: 'PY',
+    java: 'JAVA',
+    c: 'C',
+    cpp: 'CPP',
+    h: 'H',
+    json: 'JSON',
+    yaml: 'YAML',
+    yml: 'YAML',
+    xml: 'XML',
+    md: 'MD',
+    txt: 'TXT',
+    sql: 'SQL',
+    sh: 'SH',
+    go: 'GO',
+    rs: 'RS',
+    php: 'PHP',
+    rb: 'RB',
   };
 
-  return iconMap[ext || ''] || '📄';
+  return iconMap[ext || ''] || 'FILE';
 }
 
 export function prettyPrintLanguage(language: string): string {

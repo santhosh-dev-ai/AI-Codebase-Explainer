@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { LOCAL_STORAGE_KEYS } from '@/constants/config';
 
 type ActiveTab = 'overview' | 'explanation' | 'bugs' | 'flow';
 

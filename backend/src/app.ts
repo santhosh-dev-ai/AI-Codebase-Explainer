@@ -5,6 +5,7 @@ import { rateLimiter } from './middleware/rate-limiter.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.middleware';
 import healthRoutes from './routes/health.routes';
 import repositoryRoutes from './routes/repository.routes';
+import analysisRoutes from './routes/analysis.routes';
 import logger from './utils/logger.util';
 
 export function createApp(): Application {
@@ -31,6 +32,7 @@ export function createApp(): Application {
   // Routes
   app.use('/api/health', healthRoutes);
   app.use('/api/repository', repositoryRoutes);
+  app.use('/api/analysis', analysisRoutes);
 
   // 404 handler
   app.use(notFoundHandler);

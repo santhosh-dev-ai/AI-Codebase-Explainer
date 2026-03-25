@@ -7,6 +7,7 @@ import { shouldExcludeFile, shouldExcludeDirectory } from '../../utils/file-proc
 
 export class GitHubService {
   private apiBaseUrl = 'https://api.github.com';
+  private codeloadBaseUrl = 'https://codeload.github.com';
   private headers: Record<string, string>;
 
   constructor() {
@@ -27,17 +28,28 @@ export class GitHubService {
     }
 
     const { owner, repo } = parsed;
-    logger.info('Fetching repository from GitHub via ZIP download', { owner, repo });
+    logger.info('Fetching repository from GitHub via ZIP download', {
+      owner,
+      repo,
+      hasToken: Boolean(config.githubToken),
+    });
 
     try {
-      // Download the repository as a ZIP archive (single API call!)
-      const zipUrl = `${this.apiBaseUrl}/repos/${owner}/${repo}/zipball`;
-      const response = await axios.get(zipUrl, {
-        headers: this.headers,
-        responseType: 'arraybuffer',
-        maxContentLength: config.maxFileSize,
-        timeout: 120000, // 2 minute timeout for large repos
-      });
+      let response;
+      if (config.githubToken) {
+        response = await this.downloadZipViaApi(owner, repo);
+      } else {
+        try {
+          response = await this.downloadZipViaCodeload(owner, repo);
+        } catch (codeloadError) {
+          logger.warn('Codeload branch guessing failed, falling back to GitHub API zipball', {
+            owner,
+            repo,
+            error: codeloadError instanceof Error ? codeloadError.message : 'Unknown error',
+          });
+          response = await this.downloadZipViaApi(owner, repo);
+        }
+      }
 
       logger.info('ZIP archive downloaded, extracting files', { owner, repo });
 
@@ -60,7 +72,7 @@ export class GitHubService {
 
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 403) {
-          throw new Error('GitHub API rate limit exceeded. Please try again later or add a GitHub token.');
+          throw new Error('GitHub rate limit exceeded. Add GITHUB_TOKEN in backend/.env or try again later.');
         }
         if (error.response?.status === 404) {
           throw new Error('Repository not found or is private. Please check the URL.');
@@ -72,6 +84,43 @@ export class GitHubService {
 
       throw new Error(`Failed to fetch repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+
+  private async downloadZipViaApi(owner: string, repo: string) {
+    const zipUrl = `${this.apiBaseUrl}/repos/${owner}/${repo}/zipball`;
+    return axios.get(zipUrl, {
+      headers: this.headers,
+      responseType: 'arraybuffer',
+      maxContentLength: config.maxFileSize,
+      timeout: 120000,
+    });
+  }
+
+  private async downloadZipViaCodeload(owner: string, repo: string) {
+    const candidateBranches = ['main', 'master', 'develop', 'dev'];
+    let lastError: unknown = null;
+
+    for (const branch of candidateBranches) {
+      try {
+        const zipUrl = `${this.codeloadBaseUrl}/${owner}/${repo}/zip/refs/heads/${branch}`;
+
+        logger.debug('Trying codeload branch archive', { owner, repo, branch });
+
+        return await axios.get(zipUrl, {
+          headers: {
+            'User-Agent': 'Codebase-Explainer',
+          },
+          responseType: 'arraybuffer',
+          maxContentLength: config.maxFileSize,
+          timeout: 120000,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error('Unable to download repository archive from codeload');
   }
 
   private async extractFilesFromZip(buffer: Buffer): Promise<Map<string, string>> {
