@@ -90,6 +90,49 @@ main {
   scrollbar-width: thin;
 }
 
+/* Chat dock scrollbar */
+.chat-scrollbar::-webkit-scrollbar {
+  width: 9px;
+}
+
+.chat-scrollbar::-webkit-scrollbar-track {
+  background: rgba(8, 14, 28, 0.75);
+  border-radius: 10px;
+}
+
+.chat-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.9) 0%, rgba(59, 130, 246, 0.85) 100%);
+  border-radius: 10px;
+  border: 1px solid rgba(8, 14, 28, 0.9);
+}
+
+.chat-scrollbar {
+  scrollbar-color: rgba(56, 189, 248, 0.9) rgba(8, 14, 28, 0.75);
+  scrollbar-width: thin;
+}
+
+/* Center panel scrollbar */
+.center-scrollbar::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.center-scrollbar::-webkit-scrollbar-track {
+  background: rgba(8, 14, 28, 0.75);
+  border-radius: 10px;
+}
+
+.center-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.88) 0%, rgba(56, 189, 248, 0.92) 100%);
+  border-radius: 10px;
+  border: 1px solid rgba(8, 14, 28, 0.9);
+}
+
+.center-scrollbar {
+  scrollbar-color: rgba(56, 189, 248, 0.9) rgba(8, 14, 28, 0.75);
+  scrollbar-width: thin;
+}
+
 /* Code block styles */
 code {
   font-family: var(--font-jetbrains-mono);

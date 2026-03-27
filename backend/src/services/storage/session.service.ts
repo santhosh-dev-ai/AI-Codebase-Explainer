@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 import { SessionData } from '../../types/repository.types';
 import config from '../../config/env.config';
@@ -40,6 +41,7 @@ export class SessionService {
     };
 
     this.sessions.set(sessionId, session);
+    void this.persistSession(session);
 
     logger.info('Session created', {
       sessionId,
@@ -52,7 +54,14 @@ export class SessionService {
   }
 
   getSession(sessionId: string): SessionData | null {
-    const session = this.sessions.get(sessionId);
+    let session = this.sessions.get(sessionId);
+
+    if (!session) {
+      session = this.loadSessionFromDisk(sessionId);
+      if (session) {
+        this.sessions.set(sessionId, session);
+      }
+    }
 
     if (!session) {
       logger.warn('Session not found', { sessionId });
@@ -95,6 +104,7 @@ export class SessionService {
   deleteSession(sessionId: string): boolean {
     const deleted = this.sessions.delete(sessionId);
     if (deleted) {
+      this.deleteSessionFile(sessionId);
       logger.info('Session deleted', { sessionId });
     }
     return deleted;
@@ -108,6 +118,7 @@ export class SessionService {
 
     const expiresAt = new Date(Date.now() + config.sessionTTL * 1000);
     session.expiresAt = expiresAt;
+    void this.persistSession(session);
 
     logger.debug('Session extended', { sessionId, expiresAt });
     return true;
@@ -120,6 +131,7 @@ export class SessionService {
     for (const [sessionId, session] of this.sessions.entries()) {
       if (now > session.expiresAt) {
         this.sessions.delete(sessionId);
+        this.deleteSessionFile(sessionId);
         cleanedCount++;
       }
     }
@@ -137,6 +149,68 @@ export class SessionService {
     clearInterval(this.cleanupInterval);
     this.sessions.clear();
     logger.info('Session service shut down');
+  }
+
+  private getSessionFilePath(sessionId: string): string {
+    return path.join(config.sessionsDir, `${sessionId}.json`);
+  }
+
+  private async persistSession(session: SessionData): Promise<void> {
+    try {
+      const payload = {
+        ...session,
+        createdAt: session.createdAt.toISOString(),
+        expiresAt: session.expiresAt.toISOString(),
+        files: Array.from(session.files.entries()),
+      };
+
+      await fs.writeFile(
+        this.getSessionFilePath(session.sessionId),
+        JSON.stringify(payload),
+        'utf8'
+      );
+    } catch (error) {
+      logger.warn('Failed to persist session to disk', {
+        sessionId: session.sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  private loadSessionFromDisk(sessionId: string): SessionData | null {
+    try {
+      const filePath = this.getSessionFilePath(sessionId);
+      if (!fsSync.existsSync(filePath)) {
+        return null;
+      }
+
+      const raw = fsSync.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw) as Omit<SessionData, 'files' | 'createdAt' | 'expiresAt'> & {
+        files: Array<[string, string]>;
+        createdAt: string;
+        expiresAt: string;
+      };
+
+      return {
+        ...parsed,
+        files: new Map(parsed.files || []),
+        createdAt: new Date(parsed.createdAt),
+        expiresAt: new Date(parsed.expiresAt),
+      };
+    } catch (error) {
+      logger.warn('Failed to load session from disk', {
+        sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return null;
+    }
+  }
+
+  private deleteSessionFile(sessionId: string): void {
+    const filePath = this.getSessionFilePath(sessionId);
+    fs.unlink(filePath).catch(() => {
+      // Ignore cleanup race conditions.
+    });
   }
 }
 

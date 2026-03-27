@@ -6,6 +6,7 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.middle
 import healthRoutes from './routes/health.routes';
 import repositoryRoutes from './routes/repository.routes';
 import analysisRoutes from './routes/analysis.routes';
+import chatRoutes from './routes/chat.routes';
 import logger from './utils/logger.util';
 
 export function createApp(): Application {
@@ -33,6 +34,7 @@ export function createApp(): Application {
   app.use('/api/health', healthRoutes);
   app.use('/api/repository', repositoryRoutes);
   app.use('/api/analysis', analysisRoutes);
+  app.use('/api/chat', chatRoutes);
 
   // 404 handler
   app.use(notFoundHandler);
