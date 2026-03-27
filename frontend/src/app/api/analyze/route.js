@@ -17,7 +17,7 @@ export async function POST(req) {
       body: JSON.stringify({
         model: "llama3-8b-8192",
         messages: [
-          { role: "user", content: body.message }
+          { role: "user", content: body.message || "Explain this repo" }
         ]
       })
     });
@@ -25,6 +25,7 @@ export async function POST(req) {
     const data = await response.json();
 
     return Response.json({
+      sessionId: "test123", // ✅ ADD THIS
       reply: data.choices?.[0]?.message?.content || "No response"
     });
 
