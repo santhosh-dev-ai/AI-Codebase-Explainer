@@ -2,7 +2,7 @@ export const API_BASE_URL = '';
 
 export const API_ENDPOINTS = {
   HEALTH: '/api/health',
-  ANALYZE_GITHUB: '/api/analyze',
+  ANALYZE_GITHUB: '/api/repository/analyze-github',
   UPLOAD_ZIP: '/api/analyze',
   GET_FILE: (sessionId: string) => `/api/repository/${sessionId}/file`,
   GET_FILE_TREE: (sessionId: string) => `/api/repository/${sessionId}/tree`,
