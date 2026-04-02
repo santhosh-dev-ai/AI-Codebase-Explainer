@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SearchCode, MessageSquareText, ShieldAlert } from 'lucide-react';
 import { apiClient } from '@/lib/api-client';
@@ -10,6 +10,8 @@ import type { AnalyzeGitHubRequest, AnalyzeGitHubResponse } from '@/types/api.ty
 
 export default function HomePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const sessionExpired = searchParams.get('error') === 'session-expired';
   const [activeTab, setActiveTab] = useState<'github' | 'zip'>('github');
   const [githubUrl, setGithubUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
@@ -106,6 +108,18 @@ export default function HomePage() {
           transition={{ duration: 0.5, delay: 0.2 }}
           className="glass-panel-strong rounded-3xl p-8 border border-blue-500/20 shadow-[0_20px_60px_rgba(58,134,255,0.1)]"
         >
+          {sessionExpired && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-6 p-4 bg-amber-500/10 border border-amber-500/40 rounded-xl backdrop-blur-sm"
+            >
+              <p className="text-amber-200 text-sm font-medium">
+                Your previous analysis session expired. Start a new analysis to continue.
+              </p>
+            </motion.div>
+          )}
+
           {/* Tabs */}
           <div className="flex gap-1 mb-8 bg-zinc-950/30 p-1 rounded-xl border border-zinc-800/50">
             <motion.button

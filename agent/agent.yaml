@@ -1,0 +1,21 @@
+spec_version: "0.1.0"
+
+name: ai-codebase-explainer-agent
+version: "1.0.0"
+
+description: >
+  An autonomous AI agent that analyzes GitHub repositories,
+  explains project architecture, detects potential bugs,
+  and answers developer questions about the codebase.
+
+model:
+  preferred: llama-3.1-8b-instant
+
+skills:
+  - repo-analysis
+
+tags:
+  - ai
+  - github
+  - code-analysis
+  - developer-tools

@@ -158,11 +158,16 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
         setExpandedFolders(new Set(rootFolders));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load file tree');
+      const message = err instanceof Error ? err.message : 'Failed to load file tree';
+      if (/session not found|session expired/i.test(message)) {
+        router.replace('/?error=session-expired');
+        return;
+      }
+      setError(message);
     } finally {
       setIsLoadingTree(false);
     }
-  }, [sessionId]);
+  }, [sessionId, router]);
 
   useEffect(() => {
     fetchFileTree();

@@ -1,9 +1,9 @@
-export const API_BASE_URL = '';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3001';
 
 export const API_ENDPOINTS = {
   HEALTH: '/api/health',
   ANALYZE_GITHUB: '/api/repository/analyze-github',
-  UPLOAD_ZIP: '/api/analyze',
+  UPLOAD_ZIP: '/api/repository/upload-zip',
   GET_FILE: (sessionId: string) => `/api/repository/${sessionId}/file`,
   GET_FILE_TREE: (sessionId: string) => `/api/repository/${sessionId}/tree`,
   GET_OVERVIEW: (sessionId: string) => `/api/analysis/${sessionId}/overview`,
