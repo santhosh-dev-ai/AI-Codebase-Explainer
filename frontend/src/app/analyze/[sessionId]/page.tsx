@@ -1600,24 +1600,45 @@ function RisksTab({
           <div className="space-y-2">
             {risks.slice(0, 8).map((risk, idx) => {
               const files = inferFiles(risk);
+              const severityColor = risk.severity === 'high' ? 'text-rose-400 border-rose-400/35 bg-rose-950/20' : risk.severity === 'medium' ? 'text-amber-400 border-amber-400/35 bg-amber-950/20' : 'text-emerald-400 border-emerald-400/35 bg-emerald-950/20';
+              const riskPercent = risk.percentage || (risk.severity === 'high' ? 78 : risk.severity === 'medium' ? 48 : 22);
               return (
-                <div key={`${risk.title}-${idx}`} className="rounded-lg border border-white/10 bg-zinc-900/45 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium text-zinc-100">{risk.title}</p>
-                    <span className="text-[10px] uppercase text-zinc-300 rounded-full px-2 py-0.5 border border-white/20">
-                      {risk.severity}
-                    </span>
+                <div key={`${risk.title}-${idx}`} className="rounded-xl border border-white/10 bg-zinc-950/45 p-3.5 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${severityColor}`}>
+                          {risk.severity} Severity
+                        </span>
+                        {risk.category && (
+                          <span className="text-[9px] text-cyan-300 border border-cyan-400/35 bg-cyan-950/20 font-bold uppercase tracking-wider px-2 py-0.5 rounded">
+                            {risk.category}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs font-semibold text-zinc-100">{risk.title}</p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <span className="text-xs font-bold text-zinc-100 bg-white/5 border border-white/10 px-2 py-1 rounded-md">
+                        {riskPercent}% Level
+                      </span>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-zinc-300 mt-1">{risk.detail}</p>
-                  <p className="text-[11px] text-cyan-200 mt-1">Mitigation: {risk.mitigation}</p>
 
-                  <div className="flex items-center justify-between mt-2">
-                    <span className="text-[11px] text-zinc-400">Affected files: {files.length}</span>
+                  <p className="text-[11px] text-zinc-300 leading-relaxed">{risk.detail}</p>
+
+                  <div className="p-2.5 rounded-lg bg-cyan-400/5 border border-cyan-400/10 space-y-1 text-[11px]">
+                    <span className="font-bold text-cyan-200 block uppercase tracking-wider text-[9px]">Required Action Point</span>
+                    <p className="text-zinc-200">{risk.mitigation}</p>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 text-[11px]">
+                    <span className="text-zinc-400">Affected files: <strong className="text-zinc-200">{files.length}</strong></span>
                     <button
                       onClick={() => onFocusRisk(risk)}
-                      className="text-[11px] px-2 py-0.5 rounded border border-rose-300/30 text-rose-200 hover:bg-rose-300/10"
+                      className="px-2 py-1 rounded border border-rose-300/30 text-rose-200 hover:bg-rose-300/10 transition-colors"
                     >
-                      Show affected files
+                      Locate files
                     </button>
                   </div>
                 </div>
@@ -1663,64 +1684,97 @@ function DashboardTab({
   riskBreakdown: { high: number; medium: number; low: number };
 }) {
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2">
-        <MetricCard icon={<FileSearch className="w-4 h-4 text-cyan-300" />} label="Total files" value={totalFiles.toString()} />
-        <MetricCard icon={<Layers className="w-4 h-4 text-emerald-300" />} label="Total folders" value={totalFolders.toString()} />
-        <MetricCard icon={<Code2 className="w-4 h-4 text-amber-300" />} label="Estimated LOC" value={estimatedLoc.toLocaleString()} />
-        <MetricCard icon={<PieChartIcon className="w-4 h-4 text-indigo-300" />} label="Dominant language" value={dominantLanguage} />
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-2.5">
+        <MetricCard icon={<FileSearch className="w-4 h-4 text-cyan-400" />} label="Total files" value={totalFiles.toString()} />
+        <MetricCard icon={<Layers className="w-4 h-4 text-emerald-400" />} label="Total folders" value={totalFolders.toString()} />
+        <MetricCard icon={<Code2 className="w-4 h-4 text-amber-400" />} label="Estimated LOC" value={estimatedLoc.toLocaleString()} />
+        <MetricCard icon={<PieChartIcon className="w-4 h-4 text-indigo-400" />} label="Dominant language" value={dominantLanguage} />
       </div>
 
-      <ChartCard title="Language distribution" icon={<PieChartIcon className="w-4 h-4 text-cyan-300" />}>
-        <div className="h-44">
+      <ChartCard title="Language distribution" icon={<PieChartIcon className="w-4 h-4 text-cyan-400" />}>
+        <div className="h-52 relative">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={languageChart} dataKey="value" nameKey="name" outerRadius={68} innerRadius={34}>
+              <Pie
+                data={languageChart}
+                dataKey="value"
+                nameKey="name"
+                outerRadius={72}
+                innerRadius={46}
+                paddingAngle={4}
+              >
                 {languageChart.map((entry) => (
-                  <Cell key={entry.name} fill={entry.color} />
+                  <Cell key={entry.name} fill={entry.color} stroke="rgba(15,23,42,0.6)" strokeWidth={2} />
                 ))}
               </Pie>
-              <RechartsTooltip />
+              <RechartsTooltip
+                contentStyle={{
+                  background: 'rgba(8, 14, 28, 0.9)',
+                  border: '1px solid rgba(34, 211, 238, 0.3)',
+                  borderRadius: '12px',
+                  fontSize: '11px',
+                  boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                }}
+              />
             </PieChart>
           </ResponsiveContainer>
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            <span className="text-[10px] uppercase text-zinc-400 font-semibold tracking-wider">Top Lang</span>
+            <span className="text-xs font-bold text-cyan-200">{dominantLanguage}</span>
+          </div>
         </div>
       </ChartCard>
 
-      <ChartCard title="Files per folder" icon={<BarChart3 className="w-4 h-4 text-emerald-300" />}>
-        <div className="h-48">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={filesPerFolderData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis dataKey="folder" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-              <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} />
-              <RechartsTooltip />
-              <Bar dataKey="files" fill="#22c55e" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </ChartCard>
-
-      <ChartCard title="Complexity by file" icon={<BrainCircuit className="w-4 h-4 text-amber-300" />}>
+      <ChartCard title="Files per folder" icon={<BarChart3 className="w-4 h-4 text-emerald-400" />}>
         <div className="h-52">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={complexityData} layout="vertical" margin={{ left: 40, right: 12 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-              <YAxis type="category" dataKey="path" width={120} tick={{ fill: '#94a3b8', fontSize: 10 }} />
-              <RechartsTooltip />
-              <Bar dataKey="complexity" fill="#f59e0b" radius={[0, 6, 6, 0]} />
+            <BarChart data={filesPerFolderData} margin={{ left: -10, right: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+              <XAxis dataKey="folder" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={{ stroke: 'rgba(255,255,255,0.1)' }} />
+              <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={{ stroke: 'rgba(255,255,255,0.1)' }} />
+              <RechartsTooltip
+                contentStyle={{
+                  background: 'rgba(8, 14, 28, 0.9)',
+                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                  borderRadius: '12px',
+                  fontSize: '11px',
+                }}
+              />
+              <Bar dataKey="files" fill="#10b981" radius={[6, 6, 0, 0]} maxBarSize={36} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </ChartCard>
 
-      <ChartCard title="Folder contribution" icon={<Layers className="w-4 h-4 text-indigo-300" />}>
-        <div className="h-44">
+      <ChartCard title="Complexity by file" icon={<BrainCircuit className="w-4 h-4 text-amber-400" />}>
+        <div className="h-56">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={complexityData} layout="vertical" margin={{ left: -25, right: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+              <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={{ stroke: 'rgba(255,255,255,0.1)' }} />
+              <YAxis type="category" dataKey="path" width={110} tick={{ fill: '#e2e8f0', fontSize: 9 }} axisLine={{ stroke: 'rgba(255,255,255,0.1)' }} />
+              <RechartsTooltip
+                contentStyle={{
+                  background: 'rgba(8, 14, 28, 0.9)',
+                  border: '1px solid rgba(245, 158, 11, 0.3)',
+                  borderRadius: '12px',
+                  fontSize: '11px',
+                }}
+              />
+              <Bar dataKey="complexity" fill="#f59e0b" radius={[0, 6, 6, 0]} maxBarSize={16} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </ChartCard>
+
+      <ChartCard title="Folder contribution" icon={<Layers className="w-4 h-4 text-indigo-400" />}>
+        <div className="h-48 rounded-lg overflow-hidden border border-white/5">
           <ResponsiveContainer width="100%" height="100%">
             <Treemap
               data={folderTreemapData}
               dataKey="size"
-              stroke="#0f172a"
+              stroke="rgba(15,23,42,0.8)"
               fill="#3b82f6"
               animationDuration={450}
             />
@@ -1728,12 +1782,12 @@ function DashboardTab({
         </div>
       </ChartCard>
 
-      <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-100 mb-2">Risk breakdown</p>
-        <div className="grid grid-cols-3 gap-2 text-center text-xs">
-          <StatTile label="High" value={riskBreakdown.high.toString()} tone="rose" />
-          <StatTile label="Medium" value={riskBreakdown.medium.toString()} tone="amber" />
-          <StatTile label="Low" value={riskBreakdown.low.toString()} tone="emerald" />
+      <div className="rounded-xl border border-white/10 bg-zinc-950/45 p-3.5">
+        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-100 mb-3">Risk breakdown</p>
+        <div className="grid grid-cols-3 gap-2.5 text-center text-xs">
+          <StatTile label="High Risk" value={riskBreakdown.high.toString()} tone="rose" />
+          <StatTile label="Medium Risk" value={riskBreakdown.medium.toString()} tone="amber" />
+          <StatTile label="Low Risk" value={riskBreakdown.low.toString()} tone="emerald" />
         </div>
       </div>
     </div>

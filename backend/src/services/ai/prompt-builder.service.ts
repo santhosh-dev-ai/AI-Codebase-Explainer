@@ -19,7 +19,7 @@ ${Object.entries(sampleFiles)
 
 Return ONLY valid JSON (no markdown, no prose outside JSON) using this exact schema:
 {
-  "summary": "4-8 sentences with concrete behavior and purpose",
+  "summary": "4-8 sentences with concrete behavior and purpose. Make it extremely precise and specific to the codebase, avoiding generic high-level statements.",
   "executiveBullets": ["8-12 precise bullets that explain repo intent, boundaries, critical paths, and engineering tradeoffs"],
   "pattern": "primary architecture pattern",
   "projectType": "web app|api service|cli|library|data pipeline|other",
@@ -34,7 +34,7 @@ Return ONLY valid JSON (no markdown, no prose outside JSON) using this exact sch
       "responsibility": "what it owns"
     }
   ],
-  "dataFlow": "step-by-step flow from inputs to outputs",
+  "dataFlow": "Provide a clean pipeline flow represented as stages separated by '->' (e.g. Request Client -> Controller Handler -> Middleware Validation -> Service Logic -> DB Storage -> Client Response). Keep it direct and easily understandable.",
   "deepDive": {
     "architectureNarrative": "how layers/components are organized and why",
     "runtimeFlow": "request/event lifecycle through concrete components",
@@ -55,7 +55,9 @@ Return ONLY valid JSON (no markdown, no prose outside JSON) using this exact sch
       "title": "risk title",
       "severity": "high|medium|low",
       "detail": "why this is a risk",
-      "mitigation": "recommended mitigation"
+      "mitigation": "recommended mitigation",
+      "percentage": 45,
+      "category": "Security|Performance|Maintainability|Reliability"
     }
   ],
   "evidence": [
@@ -185,7 +187,7 @@ Format as JSON array:
     projectType?: string,
     relatedFiles?: string[]
   ): string {
-    let prompt = `You are an AI assistant helping developers understand a codebase. You are knowledgeable, concise, and provide accurate information.`;
+    let prompt = `You are an AI assistant helping developers understand a codebase. You are extremely knowledgeable, precise, and accurate according to users query.`;
 
     if (projectType) {
       prompt += `\n\nThis is a ${projectType} project.`;
@@ -200,11 +202,12 @@ Format as JSON array:
     }
 
     prompt += `\n\nWhen answering:
-- Be specific and reference file names and line numbers when relevant
-- Provide code examples when helpful
-- If you don't know something, say so
-- Keep responses concise but complete
-- Use markdown formatting for better readability`;
+- Be highly precise and target the answer directly to the query. Avoid fluffy conversational introductions like "Sure, I'd be happy to help!" or concluding remarks.
+- Reference exact files, variables, and line numbers when relevant.
+- Provide clean, focused code examples when helpful.
+- If you don't know something or if it's not present in the codebase, state it clearly.
+- Keep responses concise but accurate and complete.
+- Use markdown formatting for better readability.`;
 
     return prompt;
   }

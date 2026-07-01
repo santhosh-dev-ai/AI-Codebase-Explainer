@@ -39,6 +39,8 @@ export interface AnalysisRisk {
   severity: 'high' | 'medium' | 'low';
   detail: string;
   mitigation: string;
+  percentage?: number;
+  category?: string;
 }
 
 export interface EvidenceItem {
