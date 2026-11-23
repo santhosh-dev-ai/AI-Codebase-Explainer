@@ -2,6 +2,8 @@ interface Config {
   nodeEnv: string;
   aiApiKey: string;
   aiProvider: 'openai' | 'groq';
+  groqModel: string;
+  openaiModel: string;
   githubToken?: string;
   maxFileSize: number;
   sessionTTL: number;
@@ -13,6 +15,10 @@ const config: Config = {
   nodeEnv: process.env.NODE_ENV || 'development',
 
   aiProvider: (process.env.AI_PROVIDER as 'openai' | 'groq') || 'groq',
+
+  groqModel: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
 
   aiApiKey:
     process.env.GROQ_API_KEY ||

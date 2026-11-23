@@ -22,9 +22,22 @@ export class ChatService {
     const history = this.chatHistory.get(sessionId) || [];
     const files = session.files;
 
-    const currentFilePath = context?.currentFile && files.has(context.currentFile)
-      ? context.currentFile
-      : undefined;
+    // Smart path resolver: exact match, normalized path, or matching entry
+    let currentFilePath: string | undefined = undefined;
+    if (context?.currentFile) {
+      if (files.has(context.currentFile)) {
+        currentFilePath = context.currentFile;
+      } else {
+        const norm = context.currentFile.replace(/^[./\\]+/, '').replace(/\\/g, '/');
+        for (const k of files.keys()) {
+          const normKey = k.replace(/^[./\\]+/, '').replace(/\\/g, '/');
+          if (normKey === norm || normKey.endsWith('/' + norm) || norm.endsWith('/' + normKey)) {
+            currentFilePath = k;
+            break;
+          }
+        }
+      }
+    }
 
     const explicitRelated = (context?.relatedFiles || []).filter((filePath) => files.has(filePath));
     const inferredRelated = currentFilePath
@@ -45,7 +58,7 @@ export class ChatService {
 
     const response = await openaiService.generateCompletion(prompt, systemPrompt, {
       temperature: 0.3,
-      maxTokens: 1100,
+      maxTokens: 2500,
     });
 
     const references: FileReference[] = [];
@@ -104,6 +117,10 @@ export class ChatService {
     }
 
     return this.chatHistory.get(sessionId) || [];
+  }
+
+  clearHistory(sessionId: string): boolean {
+    return this.chatHistory.delete(sessionId);
   }
 
   private buildCodeContext(

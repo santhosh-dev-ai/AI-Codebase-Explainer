@@ -12,32 +12,91 @@ export class OpenAIService {
       maxTokens?: number;
     }
   ): Promise<string> {
-    try {
-      const response = await openai.chat.completions.create({
-        model: options?.model || MODELS.GPT4_TURBO,
-        messages: [
-          ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
-          { role: 'user' as const, content: prompt },
-        ],
-        temperature: options?.temperature ?? AI_CONFIG.temperature,
-        max_tokens: options?.maxTokens ?? AI_CONFIG.maxTokens,
-      });
+    const primaryModel = options?.model || MODELS.GPT4_TURBO;
+    const fallbackModel = MODELS.GPT35_TURBO;
+    const maxRetries = AI_CONFIG.retryAttempts || 3;
+    let attempt = 0;
+    let currentModel = primaryModel;
+    let hasFallenBack = false;
 
-      const content = response.choices[0]?.message?.content || '';
-      logger.info('OpenAI completion generated', {
-        model: options?.model || MODELS.GPT4_TURBO,
-        promptLength: prompt.length,
-        responseLength: content.length,
-        usage: response.usage
-      });
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        const response = await openai.chat.completions.create({
+          model: currentModel,
+          messages: [
+            ...(systemPrompt ? [{ role: 'system' as const, content: systemPrompt }] : []),
+            { role: 'user' as const, content: prompt },
+          ],
+          temperature: options?.temperature ?? AI_CONFIG.temperature,
+          max_tokens: options?.maxTokens ?? AI_CONFIG.maxTokens,
+        });
 
-      return content;
-    } catch (error) {
-      logger.error('OpenAI API error', {
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-      throw this.handleOpenAIError(error);
+        const choice = response.choices[0];
+        const message = choice?.message;
+        let content = message?.content || '';
+
+        // If content is empty but model produced reasoning, use reasoning or content
+        if (!content.trim() && typeof (message as any)?.reasoning === 'string') {
+          content = (message as any).reasoning;
+        }
+
+        logger.info('AI completion generated', {
+          model: currentModel,
+          promptLength: prompt.length,
+          responseLength: content.length,
+          usage: response.usage,
+          attempt,
+        });
+
+        return content;
+      } catch (error: any) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const isModelNotFoundError =
+          errorMsg.includes('404') ||
+          errorMsg.includes('does not exist') ||
+          errorMsg.includes('model_not_found') ||
+          errorMsg.includes('decommissioned');
+
+        // If the primary model failed because it's not found/decommissioned, fallback once
+        if (isModelNotFoundError && !hasFallenBack && currentModel !== fallbackModel) {
+          logger.warn(`Model ${currentModel} not available, falling back to ${fallbackModel}`, {
+            error: errorMsg,
+          });
+          currentModel = fallbackModel;
+          hasFallenBack = true;
+          continue;
+        }
+
+        // If we still have retries left on a transient error (rate limit, connection, 503)
+        const isTransient =
+          errorMsg.includes('rate_limit') ||
+          errorMsg.includes('429') ||
+          errorMsg.includes('503') ||
+          errorMsg.includes('Connection error') ||
+          errorMsg.includes('timeout') ||
+          errorMsg.includes('ECONNRESET');
+
+        if (isTransient && attempt < maxRetries) {
+          const delay = (AI_CONFIG.retryDelay || 1000) * Math.pow(2, attempt - 1);
+          logger.warn(`AI request failed on attempt ${attempt}, retrying in ${delay}ms...`, {
+            model: currentModel,
+            error: errorMsg,
+          });
+          await new Promise((res) => setTimeout(res, delay));
+          continue;
+        }
+
+        logger.error('AI completion error', {
+          model: currentModel,
+          attempt,
+          error: errorMsg,
+        });
+        throw this.handleOpenAIError(error);
+      }
     }
+
+    throw new Error('Failed to generate AI completion after maximum retry attempts');
   }
 
   async generateStreamingCompletion(
@@ -98,18 +157,26 @@ export class OpenAIService {
 
   private handleOpenAIError(error: unknown): Error {
     if (error instanceof Error) {
-      if (error.message.includes('rate_limit')) {
-        return new Error('OpenAI API rate limit exceeded. Please try again later.');
+      const sanitized = error.message.replace(/(?:gsk_|sk-)[a-zA-Z0-9_-]+/g, '[REDACTED_API_KEY]');
+
+      if (sanitized.includes('rate_limit') || sanitized.includes('429')) {
+        return new Error('AI provider rate limit reached. Please retry in a few moments.');
       }
-      if (error.message.includes('insufficient_quota')) {
-        return new Error('OpenAI API quota exceeded. Please check your API key.');
+      if (sanitized.includes('insufficient_quota') || sanitized.includes('quota')) {
+        return new Error('AI provider quota exceeded. Please check your API credits.');
       }
-      if (error.message.includes('invalid_api_key')) {
-        return new Error('Invalid OpenAI API key.');
+      if (sanitized.includes('invalid_api_key') || sanitized.includes('401')) {
+        return new Error('Invalid AI API key. Please check your configuration.');
       }
-      return new Error(`OpenAI API error: ${error.message}`);
+      if (sanitized.includes('404') || sanitized.includes('does not exist') || sanitized.includes('model_not_found')) {
+        return new Error('Configured AI model is unavailable. Falling back to alternative model.');
+      }
+      if (sanitized.includes('Connection error') || sanitized.includes('ECONNREFUSED') || sanitized.includes('ETIMEDOUT')) {
+        return new Error('Unable to connect to AI provider. Please check your internet connection.');
+      }
+      return new Error(`AI error: ${sanitized}`);
     }
-    return new Error('Unknown OpenAI API error');
+    return new Error('Unknown AI error');
   }
 
   estimateTokens(text: string): number {

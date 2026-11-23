@@ -8,6 +8,9 @@ interface Config {
   nodeEnv: string;
   aiApiKey: string;
   aiProvider: 'openai' | 'groq';
+  groqModel: string;
+  groqFastModel: string;
+  openaiModel: string;
   githubToken?: string;
   redisUrl?: string;
   maxFileSize: number;
@@ -23,6 +26,9 @@ const config: Config = {
   port: parseInt(process.env.PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   aiProvider: (process.env.AI_PROVIDER as 'openai' | 'groq') || 'groq',
+  groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
+  groqFastModel: process.env.GROQ_FAST_MODEL || 'qwen/qwen3.8-27b',
+  openaiModel: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
   aiApiKey: process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || '',
   githubToken: process.env.GITHUB_TOKEN,
   redisUrl: process.env.REDIS_URL,

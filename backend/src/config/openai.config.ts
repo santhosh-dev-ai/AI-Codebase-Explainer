@@ -7,20 +7,22 @@ export const openai = new OpenAI({
   baseURL: config.aiProvider === 'groq'
     ? 'https://api.groq.com/openai/v1'
     : 'https://api.openai.com/v1',
+  timeout: 60000,
+  maxRetries: 2,
 });
 
 // Model configuration based on provider
 export const MODELS = config.aiProvider === 'groq'
   ? {
-      GPT4_TURBO: 'llama-3.3-70b-versatile', // Groq's most capable model
-      GPT35_TURBO: 'llama-3.1-8b-instant',   // Fast model for simple tasks
-      EMBEDDING: 'text-embedding-3-small',    // Groq doesn't have embeddings yet
-    } as const
+      GPT4_TURBO: config.groqModel || 'openai/gpt-oss-120b',
+      GPT35_TURBO: config.groqFastModel || 'qwen/qwen3.8-27b',
+      EMBEDDING: 'text-embedding-3-small', // Groq doesn't have embeddings yet
+    }
   : {
-      GPT4_TURBO: 'gpt-4-turbo-preview',
-      GPT35_TURBO: 'gpt-3.5-turbo',
+      GPT4_TURBO: config.openaiModel || 'gpt-4-turbo-preview',
+      GPT35_TURBO: process.env.OPENAI_FAST_MODEL || 'gpt-3.5-turbo',
       EMBEDDING: 'text-embedding-3-small',
-    } as const;
+    };
 
 export const TOKEN_LIMITS = {
   GPT4_TURBO: 128000,

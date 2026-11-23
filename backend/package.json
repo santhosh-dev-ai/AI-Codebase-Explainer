@@ -4,7 +4,9 @@
   "description": "AI-powered Codebase Explainer Backend API",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "nodemon --exec ts-node src/server.ts",
+    "dev": "nodemon",
+    "build": "tsc",
+    "test": "ts-node -T src/test/suite.runner.ts",
     "start": "node dist/server.js",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\""

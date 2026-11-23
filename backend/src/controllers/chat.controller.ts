@@ -44,6 +44,22 @@ export class ChatController {
       next(error);
     }
   }
+
+  async clearHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+      chatService.clearHistory(sessionId);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          message: 'Chat history cleared successfully',
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const chatController = new ChatController();

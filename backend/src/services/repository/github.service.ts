@@ -138,8 +138,14 @@ export class GitHubService {
       }
     }
 
+    let totalExtractedBytes = 0;
+    const MAX_TOTAL_EXTRACTED = 150 * 1024 * 1024; // 150MB cumulative safety limit
+
     for (const [zipPath, zipEntry] of Object.entries(zip.files)) {
       if (zipEntry.dir) continue;
+
+      // Guard against path traversal attempts in archive entries
+      if (zipPath.includes('..') || zipPath.startsWith('/')) continue;
 
       // Strip the top-level directory prefix
       let relativePath = zipPath;
@@ -166,8 +172,16 @@ export class GitHubService {
         if (content.length > 500000) continue;
         if (this.isBinaryContent(content)) continue;
 
+        totalExtractedBytes += Buffer.byteLength(content, 'utf8');
+        if (totalExtractedBytes > MAX_TOTAL_EXTRACTED) {
+          throw new Error('Repository archive exceeds uncompressed safety limit of 150MB');
+        }
+
         files.set(relativePath, content);
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('safety limit')) {
+          throw err;
+        }
         // Skip files that can't be read as text (binary files)
         logger.debug('Skipping binary file', { path: relativePath });
       }

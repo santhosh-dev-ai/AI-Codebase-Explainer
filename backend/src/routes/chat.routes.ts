@@ -20,4 +20,11 @@ router.get(
   chatController.getHistory.bind(chatController)
 );
 
+router.delete(
+  '/:sessionId/history',
+  rateLimiter,
+  validateSessionId,
+  chatController.clearHistory.bind(chatController)
+);
+
 export default router;

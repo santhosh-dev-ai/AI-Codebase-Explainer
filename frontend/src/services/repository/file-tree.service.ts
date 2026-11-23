@@ -2,7 +2,6 @@ import path from 'path';
 import { FileNode, RepoMetadata } from '../../types/repository.types';
 import {
   shouldExcludeFile,
-  shouldExcludeDirectory,
   detectLanguage,
   calculateDepth
 } from '../../utils/file-processor.util';

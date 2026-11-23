@@ -77,15 +77,59 @@ export class SessionService {
     return session;
   }
 
-  getFileContent(sessionId: string, filePath: string): string | null {
+  resolveFilePath(sessionId: string, filePath: string): string | null {
     const session = this.getSession(sessionId);
-    if (!session) {
+    if (!session || !filePath) {
       return null;
     }
 
-    const content = session.files.get(filePath);
-    if (!content) {
+    if (session.files.has(filePath)) {
+      return filePath;
+    }
+
+    const normalized = filePath.replace(/\\/g, '/').replace(/^\.?\//, '').trim();
+    if (session.files.has(normalized)) {
+      return normalized;
+    }
+
+    const withoutLeading = normalized.replace(/^\/+/, '');
+    if (session.files.has(withoutLeading)) {
+      return withoutLeading;
+    }
+
+    const lowerTarget = withoutLeading.toLowerCase();
+    for (const key of session.files.keys()) {
+      const keyNorm = key.replace(/\\/g, '/').replace(/^\/+/, '');
+      if (keyNorm === withoutLeading || keyNorm.toLowerCase() === lowerTarget) {
+        return key;
+      }
+      if (keyNorm.endsWith('/' + withoutLeading) || withoutLeading.endsWith('/' + keyNorm)) {
+        return key;
+      }
+    }
+
+    return null;
+  }
+
+  hasFile(sessionId: string, filePath: string): boolean {
+    return this.resolveFilePath(sessionId, filePath) !== null;
+  }
+
+  getFileContent(sessionId: string, filePath: string): string | null {
+    const session = this.getSession(sessionId);
+    if (!session || !filePath) {
+      return null;
+    }
+
+    const actualPath = this.resolveFilePath(sessionId, filePath);
+    if (!actualPath) {
       logger.warn('File not found in session', { sessionId, filePath });
+      return null;
+    }
+
+    const content = session.files.get(actualPath);
+    if (content === undefined) {
+      logger.warn('File content undefined in session', { sessionId, filePath, actualPath });
       return null;
     }
 
@@ -152,7 +196,8 @@ export class SessionService {
   }
 
   private getSessionFilePath(sessionId: string): string {
-    return path.join(config.sessionsDir, `${sessionId}.json`);
+    const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
+    return path.join(config.sessionsDir, `${safeId}.json`);
   }
 
   private async persistSession(session: SessionData): Promise<void> {

@@ -35,17 +35,19 @@ export class FileTreeService {
     current: Map<string, FileNode>,
     parts: string[],
     fullPath: string,
-    content: string
+    content: string,
+    currentPrefix = ''
   ): void {
     if (parts.length === 0) return;
 
     const [head, ...tail] = parts;
+    const isFile = tail.length === 0;
+    const nodePath = isFile ? fullPath : (currentPrefix ? `${currentPrefix}/${head}` : head);
 
     if (!current.has(head)) {
-      const isFile = tail.length === 0;
       const node: FileNode = {
         name: head,
-        path: fullPath,
+        path: nodePath,
         type: isFile ? 'file' : 'directory',
         ...(isFile && {
           size: Buffer.byteLength(content, 'utf8'),
@@ -62,7 +64,7 @@ export class FileTreeService {
       const node = current.get(head)!;
       if (node.type === 'directory' && node.children) {
         const childMap = new Map(node.children.map(child => [child.name, child]));
-        this.addToTree(childMap, tail, fullPath, content);
+        this.addToTree(childMap, tail, fullPath, content, nodePath);
         node.children = Array.from(childMap.values()).sort((a, b) => {
           if (a.type !== b.type) {
             return a.type === 'directory' ? -1 : 1;
@@ -73,14 +75,14 @@ export class FileTreeService {
     }
   }
 
-  generateMetadata(files: Map<string, string>): RepoMetadata {
+  generateMetadata(files: Map<string, string>, fallbackName?: string): RepoMetadata {
     logger.info('Generating repository metadata');
 
     const languages: Record<string, number> = {};
     const fileTypes: Record<string, number> = {};
     let totalSize = 0;
     let maxDepth = 0;
-let totalFiles = 0;
+    let totalFiles = 0;
 
     for (const [filePath, content] of files.entries()) {
       const size = Buffer.byteLength(content, 'utf8');
@@ -106,12 +108,18 @@ let totalFiles = 0;
       maxDepth = Math.max(maxDepth, depth);
     }
 
-    // Extract repo name from first file path
-    const firstPath = Array.from(files.keys())[0] || 'unknown';
-    const repoName = firstPath.split('/')[0] || 'unknown';
+    let repoName = fallbackName?.trim();
+    if (!repoName) {
+      const firstPath = Array.from(files.keys())[0] || 'repository';
+      if (firstPath.includes('/')) {
+        repoName = firstPath.split('/')[0];
+      } else {
+        repoName = path.basename(firstPath, path.extname(firstPath)) || 'repository';
+      }
+    }
 
     const metadata: RepoMetadata = {
-      name: repoName,
+      name: repoName || 'repository',
       totalFiles,
       totalSize,
       languages,

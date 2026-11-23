@@ -33,9 +33,9 @@ export function validateSessionId(req: Request, res: Response, next: NextFunctio
 }
 
 export function validateFilePath(req: Request, res: Response, next: NextFunction): void {
-  const filePath = req.query.filePath as string;
+  const filePath = (req.body?.filePath || req.query?.filePath) as string;
 
-  if (!filePath) {
+  if (!filePath || typeof filePath !== 'string') {
     return next(createError('File path is required', 400));
   }
 

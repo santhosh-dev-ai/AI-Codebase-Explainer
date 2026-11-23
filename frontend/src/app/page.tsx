@@ -70,43 +70,36 @@ export default function HomePage() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.985 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.4, ease: 'easeOut' }}
+      initial={{ opacity: 1 }}
+      animate={{ opacity: 1 }}
       className="min-h-screen flex items-center justify-center bg-background premium-bg p-4 relative overflow-hidden"
     >
       <div className="premium-grid" />
       <div className="w-full max-w-2xl relative z-10">
         {/* Header */}
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.1 }}
-          className="text-center mb-12"
+        <div 
+          className="text-center mb-10"
         >
-          <div className="inline-block mb-4">
-            <motion.span 
-              className="inline-flex items-center px-4 py-2 rounded-2xl border border-blue-500/30 bg-blue-500/8 backdrop-blur-md"
-              animate={{ borderColor: ['rgba(58, 134, 255, 0.3)', 'rgba(58, 134, 255, 0.6)', 'rgba(58, 134, 255, 0.3)'] }}
-              transition={{ duration: 3, repeat: Infinity }}
+          <div className="inline-block mb-3">
+            <span 
+              className="inline-flex items-center px-4 py-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 text-xs font-semibold tracking-wide text-cyan-300"
             >
-              <span className="text-xs font-semibold tracking-wide text-blue-300">AI-POWERED ANALYSIS</span>
-            </motion.span>
+              AI-POWERED CODEBASE EXPLORER
+            </span>
           </div>
-          <h1 className="text-5xl md:text-6xl font-bold mb-4 tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-blue-300 via-blue-100 to-cyan-300">
+          <h1 className="text-4xl md:text-5xl font-extrabold mb-3 tracking-tight text-white">
             Codebase Explainer
           </h1>
-          <p className="text-xl text-zinc-300 max-w-xl mx-auto leading-relaxed">
-            Understand any codebase instantly with AI-powered analysis and interactive dashboards
+          <p className="text-base text-zinc-300 max-w-lg mx-auto leading-relaxed">
+            Understand any GitHub repository or ZIP archive with instant architectural analysis and deep file insights.
           </p>
-        </motion.div>
+        </div>
 
         {/* Main Card */}
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-          className="glass-panel-strong rounded-3xl p-8 border border-blue-500/20 shadow-[0_20px_60px_rgba(58,134,255,0.1)]"
+          initial={{ opacity: 1 }}
+          animate={{ opacity: 1 }}
+          className="glass-panel-strong rounded-3xl p-7 border border-white/10 shadow-2xl bg-zinc-950/80 backdrop-blur-xl"
         >
           {sessionExpired && (
             <motion.div
@@ -170,9 +163,27 @@ export default function HomePage() {
                   value={githubUrl}
                   onChange={(e) => setGithubUrl(e.target.value)}
                   placeholder="https://github.com/username/repository"
-                  className="gh-input w-full border border-blue-500/20 focus:border-blue-500/60"
+                  className="gh-input w-full border border-blue-500/30 focus:border-cyan-400/70 bg-zinc-900/70 text-zinc-100 placeholder:text-zinc-500 shadow-inner"
                   disabled={isLoading}
                 />
+                <div className="flex flex-wrap items-center gap-2 mt-2.5">
+                  <span className="text-xs text-zinc-400 font-medium">Sample repos:</span>
+                  {[
+                    { name: 'express', url: 'https://github.com/expressjs/express' },
+                    { name: 'flask', url: 'https://github.com/pallets/flask' },
+                    { name: 'axios', url: 'https://github.com/axios/axios' },
+                  ].map((repo) => (
+                    <button
+                      key={repo.name}
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => setGithubUrl(repo.url)}
+                      className="text-xs px-3 py-1 rounded-full bg-white/10 hover:bg-cyan-500/20 border border-white/15 hover:border-cyan-400/50 text-cyan-200 font-medium transition-all shadow-sm disabled:opacity-50"
+                    >
+                      {repo.name}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <motion.button

@@ -10,7 +10,7 @@ async function callGroq(prompt) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
+      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
       messages: [
         {
           role: "system",

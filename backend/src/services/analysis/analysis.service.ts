@@ -10,8 +10,12 @@ import type {
   DeepDiveExplanation,
   EvidenceItem,
   KeyModule,
+  FileExplanation,
+  FunctionInfo,
+  Bug,
 } from '../../types/analysis.types';
 import type { FileNode, RepoMetadata } from '../../types/repository.types';
+import { detectLanguage } from '../../utils/file-processor.util';
 
 export class AnalysisService {
   async generateOverview(sessionId: string): Promise<ArchitectureOverview | null> {
@@ -30,11 +34,19 @@ export class AnalysisService {
       sampleFiles
     );
 
-    const rawResponse = await openaiService.generateCompletion(
-      prompt,
-      'You are a senior software architect. Return strict JSON only.',
-      { temperature: 0.2, maxTokens: 3800 }
-    );
+    let rawResponse = '';
+    try {
+      rawResponse = await openaiService.generateCompletion(
+        prompt,
+        'You are a senior software architect. Return strict JSON only.',
+        { temperature: 0.2, maxTokens: 3800 }
+      );
+    } catch (error) {
+      logger.warn('AI overview generation error, falling back to deterministic analysis', {
+        sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
 
     const parsed = this.parseOverview(rawResponse);
     const enriched = this.enrichWithDeterministicSignals(
@@ -52,6 +64,59 @@ export class AnalysisService {
     });
 
     return enriched;
+  }
+
+  async explainFile(sessionId: string, filePath: string): Promise<FileExplanation | null> {
+    const session = sessionService.getSession(sessionId);
+    if (!session || !filePath) {
+      return null;
+    }
+
+    const actualPath = sessionService.resolveFilePath(sessionId, filePath) || filePath;
+    const fileContent = sessionService.getFileContent(sessionId, actualPath);
+    if (fileContent === null) {
+      return null;
+    }
+
+    const language = detectLanguage(actualPath);
+    const deterministic = this.extractDeterministicFileInfo(actualPath, fileContent, language);
+
+    try {
+      const truncated =
+        fileContent.length > 6000
+          ? `${fileContent.substring(0, 6000)}\n// ... [remaining content truncated for analysis]`
+          : fileContent;
+
+      const prompt = promptBuilderService.buildFileExplanationPrompt(
+        actualPath,
+        truncated,
+        language,
+        session.metadata.name
+      );
+
+      const rawResponse = await openaiService.generateCompletion(
+        prompt,
+        'You are an expert code reviewer. Return strict JSON only.',
+        { temperature: 0.2, maxTokens: 1800 }
+      );
+
+      const parsed = this.parseFileExplanation(rawResponse, actualPath, deterministic);
+      logger.info('File explanation generated', {
+        sessionId,
+        filePath: actualPath,
+        functionsCount: parsed.keyFunctions.length,
+        complexity: parsed.complexity,
+      });
+
+      return parsed;
+    } catch (error) {
+      logger.warn('AI file explanation generation error, using deterministic analysis', {
+        sessionId,
+        filePath: actualPath,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return deterministic;
+    }
   }
 
   private renderTree(nodes: FileNode[], level = 0): string {
@@ -413,6 +478,247 @@ export class AnalysisService {
     }
 
     return candidates.slice(0, 20);
+  }
+
+  private extractDeterministicFileInfo(
+    filePath: string,
+    content: string,
+    language: string
+  ): FileExplanation {
+    const lines = content.split('\n');
+    const totalLines = lines.length;
+
+    // Detect dependencies/imports
+    const dependencies: string[] = [];
+    const jsImportRegex = /(?:import\s+(?:(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)(?:\s*,\s*(?:\{[^}]+\}|\*\s+as\s+\w+|\w+))*\s+from\s+)?['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))/g;
+    let match: RegExpExecArray | null;
+    while ((match = jsImportRegex.exec(content)) !== null) {
+      const dep = match[1] || match[2];
+      if (dep && !dependencies.includes(dep)) {
+        dependencies.push(dep);
+      }
+    }
+
+    const pyImportRegex = /^(?:from\s+(\S+)\s+)?import\s+([^\n#]+)/gm;
+    while ((match = pyImportRegex.exec(content)) !== null) {
+      const dep = (match[1] || match[2]).trim().split(/\s*,\s*/)[0];
+      if (dep && !dependencies.includes(dep)) {
+        dependencies.push(dep);
+      }
+    }
+
+    // Detect exports
+    const exportsList: string[] = [];
+    const exportRegex = /export\s+(?:default\s+)?(?:class|function|const|let|var|interface|type|enum)\s+(\w+)/g;
+    while ((match = exportRegex.exec(content)) !== null) {
+      if (match[1] && !exportsList.includes(match[1])) {
+        exportsList.push(match[1]);
+      }
+    }
+
+    // Detect functions/methods
+    const keyFunctions: FunctionInfo[] = [];
+    const funcRegex =
+      /^(?:\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)|\s*(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*(?:=>|:)|\s*(?:public|private|protected|async|\*)*\s*(\w+)\s*\([^)]*\)\s*\{|\s*def\s+(\w+)\s*\([^)]*\):)/gm;
+
+    lines.forEach((line, index) => {
+      let lineMatch: RegExpExecArray | null;
+      while ((lineMatch = funcRegex.exec(line)) !== null) {
+        const name = lineMatch[1] || lineMatch[2] || lineMatch[3] || lineMatch[4];
+        if (name && !['if', 'for', 'while', 'switch', 'catch'].includes(name) && keyFunctions.length < 15) {
+          keyFunctions.push({
+            name,
+            lineStart: index + 1,
+            lineEnd: Math.min(index + 20, totalLines),
+            description: `Function ${name} handling operations in ${path.basename(filePath)}.`,
+            parameters: [],
+            returns: 'unknown',
+          });
+        }
+      }
+    });
+
+    const complexity: 'low' | 'medium' | 'high' =
+      totalLines > 350 || keyFunctions.length > 12
+        ? 'high'
+        : totalLines > 100 || keyFunctions.length > 5
+        ? 'medium'
+        : 'low';
+
+    const fileName = path.basename(filePath);
+    const patterns = [
+      `${language.toUpperCase()} module implementation`,
+      `Modular organization with ${keyFunctions.length} primary function(s)`,
+    ];
+
+    if (dependencies.length > 0) {
+      patterns.push(`External dependencies integration (${dependencies.slice(0, 3).join(', ')})`);
+    }
+
+    return {
+      filePath,
+      purpose: `Provides core logic and services for ${fileName} in the project structure.`,
+      keyFunctions,
+      dependencies: dependencies.slice(0, 15),
+      exports: exportsList.slice(0, 15),
+      patterns: patterns.slice(0, 4),
+      complexity,
+    };
+  }
+
+  private parseFileExplanation(
+    raw: string,
+    filePath: string,
+    fallback: FileExplanation
+  ): FileExplanation {
+    try {
+      const json = this.extractJson(raw);
+      const parsed = JSON.parse(json) as Partial<FileExplanation>;
+
+      const complexityRaw = String(parsed.complexity || '').toLowerCase();
+      const complexity =
+        complexityRaw === 'low' || complexityRaw === 'medium' || complexityRaw === 'high'
+          ? complexityRaw
+          : fallback.complexity;
+
+      const keyFunctions =
+        Array.isArray(parsed.keyFunctions) && parsed.keyFunctions.length > 0
+          ? parsed.keyFunctions.map((fn) => ({
+              name: String(fn.name || 'anonymous').trim(),
+              lineStart: Number(fn.lineStart) || 1,
+              lineEnd: Number(fn.lineEnd) || 1,
+              description: String(fn.description || 'No description provided').trim(),
+              parameters: Array.isArray(fn.parameters) ? fn.parameters.map(String) : [],
+              returns: String(fn.returns || 'void').trim(),
+            }))
+          : fallback.keyFunctions;
+
+      const dependencies =
+        Array.isArray(parsed.dependencies) && parsed.dependencies.length > 0
+          ? parsed.dependencies.map(String).filter(Boolean)
+          : fallback.dependencies;
+
+      const exports =
+        Array.isArray(parsed.exports) && parsed.exports.length > 0
+          ? parsed.exports.map(String).filter(Boolean)
+          : fallback.exports;
+
+      const patterns =
+        Array.isArray(parsed.patterns) && parsed.patterns.length > 0
+          ? parsed.patterns.map(String).filter(Boolean)
+          : fallback.patterns;
+
+      return {
+        filePath,
+        purpose: String(parsed.purpose || fallback.purpose).trim(),
+        keyFunctions,
+        dependencies,
+        exports,
+        patterns,
+        complexity,
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
+  async detectBugs(sessionId: string, filePath?: string): Promise<Bug[]> {
+    const session = sessionService.getSession(sessionId);
+    if (!session) {
+      return [];
+    }
+
+    const targetPath = filePath
+      ? (sessionService.resolveFilePath(sessionId, filePath) || filePath)
+      : Array.from(session.files.keys())[0];
+    const fileContent = targetPath ? sessionService.getFileContent(sessionId, targetPath) : null;
+    if (!targetPath || !fileContent) {
+      return [];
+    }
+
+    const language = detectLanguage(targetPath);
+    try {
+      const truncated =
+        fileContent.length > 5000
+          ? `${fileContent.substring(0, 5000)}\n// ... [remaining content truncated]`
+          : fileContent;
+
+      const prompt = promptBuilderService.buildBugDetectionPrompt(targetPath, truncated, language);
+      const rawResponse = await openaiService.generateCompletion(
+        prompt,
+        'You are a senior software quality engineer. Return strict JSON only.',
+        { temperature: 0.2, maxTokens: 1800 }
+      );
+
+      const json = this.extractJson(rawResponse);
+      const parsed = JSON.parse(json);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => ({
+          severity: (['critical', 'high', 'medium', 'low'].includes(item.severity)
+            ? item.severity
+            : 'medium') as Bug['severity'],
+          type: String(item.type || 'Potential Bug'),
+          line: Number(item.line) || 1,
+          description: String(item.description || 'Potential issue detected'),
+          suggestion: String(item.suggestion || 'Review logic and add safeguards'),
+          codeSnippet: String(item.codeSnippet || ''),
+        }));
+      }
+      return [];
+    } catch (error) {
+      logger.warn('AI bug detection failed, returning empty list', {
+        sessionId,
+        targetPath,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return [];
+    }
+  }
+
+  async getFlowDiagram(sessionId: string): Promise<{ mermaid: string; description: string }> {
+    const session = sessionService.getSession(sessionId);
+    if (!session) {
+      return {
+        mermaid: 'graph TD\n  Client[Client] --> Server[Server]',
+        description: 'Session unavailable',
+      };
+    }
+
+    const sampleFiles = this.pickRepresentativeFiles(session.files);
+    const fileTree = this.renderTree(session.fileTree);
+
+    try {
+      const prompt = promptBuilderService.buildFlowDiagramPrompt(
+        fileTree,
+        sampleFiles,
+        session.metadata.name
+      );
+
+      const rawResponse = await openaiService.generateCompletion(
+        prompt,
+        'You are a software architect who creates accurate Mermaid diagrams.',
+        { temperature: 0.2, maxTokens: 1200 }
+      );
+
+      const mermaidMatch = rawResponse.match(/```mermaid\s*([\s\S]*?)```/i);
+      const mermaid = mermaidMatch ? mermaidMatch[1].trim() : rawResponse.trim();
+
+      return {
+        mermaid: mermaid.startsWith('graph') || mermaid.startsWith('flowchart')
+          ? mermaid
+          : `flowchart TD\n  Client[User/Client] --> App[Application: ${session.metadata.name}]\n  App --> Storage[Local Data/Files]`,
+        description: `Architecture and control flow diagram for ${session.metadata.name}.`,
+      };
+    } catch (error) {
+      logger.warn('AI flow diagram failed, generating deterministic diagram', {
+        sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return {
+        mermaid: `flowchart TD\n  Client[User/Client] --> App[Application: ${session.metadata.name}]\n  App --> Storage[Local Data/Files]`,
+        description: `High-level flow diagram for ${session.metadata.name}.`,
+      };
+    }
   }
 }
 

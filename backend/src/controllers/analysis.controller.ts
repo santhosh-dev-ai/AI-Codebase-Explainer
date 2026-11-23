@@ -22,6 +22,68 @@ export class AnalysisController {
       next(error);
     }
   }
+
+  async explainFile(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+      const filePath = (req.body?.filePath || req.query?.filePath) as string;
+
+      if (!filePath) {
+        throw createError('File path is required', 400);
+      }
+
+      const fileExplanation = await analysisService.explainFile(sessionId, filePath);
+      if (!fileExplanation) {
+        throw createError('Failed to generate file explanation', 500);
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          fileExplanation,
+          explanation: fileExplanation,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async detectBugs(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+      const filePath = (req.body?.filePath || req.query?.filePath || req.query?.path) as string | undefined;
+
+      const bugs = await analysisService.detectBugs(sessionId, filePath);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          bugs,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getFlowDiagram(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+
+      const flowDiagram = await analysisService.getFlowDiagram(sessionId);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          flowDiagram,
+          mermaid: flowDiagram.mermaid,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const analysisController = new AnalysisController();

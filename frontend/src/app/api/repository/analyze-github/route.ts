@@ -1,58 +1,33 @@
-import { githubService } from '@/services/repository/github.service';
-import { fileTreeService } from '@/services/repository/file-tree.service';
-import { sessionService } from '@/services/storage/session.service';
-import { isValidGitHubUrl } from '@/services/repository/validation.service';
+import { API_BASE_URL } from '@/constants/config';
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { githubUrl, branch } = body;
 
-    // ✅ Validation
-    if (!isValidGitHubUrl(githubUrl)) {
+    if (!githubUrl || typeof githubUrl !== 'string') {
       return Response.json(
-        { success: false, error: 'Invalid GitHub URL' },
+        { success: false, error: { message: 'Invalid GitHub URL' } },
         { status: 400 }
       );
     }
 
-    console.log('Analyzing GitHub repository', { githubUrl, branch });
-
-    // ✅ Fetch repository
-    const files = await githubService.fetchRepository(githubUrl);
-
-    // ✅ Filter large repos
-    const filteredFiles = fileTreeService.filterLargeRepository(files);
-
-    // ✅ Generate tree + metadata
-    const fileTree = fileTreeService.generateFileTree(filteredFiles);
-    const metadata = fileTreeService.generateMetadata(filteredFiles);
-
-    // ⚠️ SESSION WARNING (see below)
-    const sessionId = sessionService.createSession({
-      fileTree,
-      metadata,
-      files: filteredFiles,
-      source: 'github',
-      sourceUrl: githubUrl,
-    });
-
-    return Response.json({
-      success: true,
-      data: {
-        sessionId,
-        fileTree,
-        metadata,
+    const response = await fetch(`${API_BASE_URL}/api/repository/analyze-github`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
+      body: JSON.stringify({ githubUrl, branch }),
     });
 
+    const data = await response.json();
+    return Response.json(data, { status: response.status });
   } catch (error: any) {
-    console.error(error);
-
+    console.error('Error proxying analyze-github request:', error);
     return Response.json(
       {
         success: false,
-        error: error.message || 'Internal Server Error',
+        error: { message: error.message || 'Internal Server Error' },
       },
       { status: 500 }
     );

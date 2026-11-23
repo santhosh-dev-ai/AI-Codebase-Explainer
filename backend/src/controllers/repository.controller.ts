@@ -3,7 +3,7 @@ import { githubService } from '../services/repository/github.service';
 import { zipParserService } from '../services/repository/zip-parser.service';
 import { fileTreeService } from '../services/repository/file-tree.service';
 import { sessionService } from '../services/storage/session.service';
-import { isValidGitHubUrl } from '../services/repository/validation.service';
+import { isValidGitHubUrl, parseGitHubUrl } from '../services/repository/validation.service';
 import { createError } from '../middleware/error-handler.middleware';
 import logger from '../utils/logger.util';
 import { detectLanguage } from '../utils/file-processor.util';
@@ -26,8 +26,10 @@ export class RepositoryController {
       const filteredFiles = fileTreeService.filterLargeRepository(files);
 
       // Generate file tree and metadata
+      const repoTarget = parseGitHubUrl(githubUrl);
+      const repoName = repoTarget?.repo || 'repository';
       const fileTree = fileTreeService.generateFileTree(filteredFiles);
-      const metadata = fileTreeService.generateMetadata(filteredFiles);
+      const metadata = fileTreeService.generateMetadata(filteredFiles, repoName);
 
       // Create session
       const sessionId = sessionService.createSession({
@@ -75,9 +77,9 @@ export class RepositoryController {
       const filteredFiles = fileTreeService.filterLargeRepository(files);
 
       // Generate file tree and metadata
+      const zipName = req.file.originalname.replace(/\.[^/.]+$/, '').trim() || 'uploaded-project';
       const fileTree = fileTreeService.generateFileTree(filteredFiles);
-      const metadata = fileTreeService.generateMetadata(filteredFiles);
-
+      const metadata = fileTreeService.generateMetadata(filteredFiles, zipName);
       // Create session
       const sessionId = sessionService.createSession({
         fileTree,
@@ -102,21 +104,26 @@ export class RepositoryController {
   async getFile(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { sessionId } = req.params;
-      const filePath = req.query.filePath as string;
+      const filePath = (req.query.filePath || req.query.path || req.body?.filePath || req.body?.path) as string;
 
-      const content = sessionService.getFileContent(sessionId, filePath);
-      if (!content) {
-        throw createError('File not found', 404);
+      if (!filePath) {
+        throw createError('File path is required', 400);
       }
 
-      const language = detectLanguage(filePath);
+      const actualPath = sessionService.resolveFilePath(sessionId, filePath) || filePath;
+      const content = sessionService.getFileContent(sessionId, filePath);
+      if (content === null) {
+        throw createError(`File not found: ${filePath}`, 404);
+      }
+
+      const language = detectLanguage(actualPath);
       const lines = content.split('\n').length;
       const size = Buffer.byteLength(content, 'utf8');
 
       res.status(200).json({
         success: true,
         data: {
-          path: filePath,
+          path: actualPath,
           content,
           language,
           lines,
