@@ -15,6 +15,28 @@ export interface ArchitectureOverview {
   evidence: EvidenceItem[];
   confidence: number;
   unknowns: string[];
+  // Canonical fields for consistency across all views
+  analysisMode?: 'ai-enriched' | 'deterministic' | 'cached';
+  contentHash?: string;
+  executionFlow?: ExecutionFlowStep[];
+  architectureLayers?: ArchitectureLayer[];
+}
+
+export interface ExecutionFlowStep {
+  step: number;
+  title: string;
+  stage: 'entry' | 'route' | 'middleware' | 'controller' | 'service' | 'storage' | 'egress';
+  description: string;
+  files: string[];
+  statusLabel: 'CONFIRMED' | 'INFERRED';
+  confidence: number;
+}
+
+export interface ArchitectureLayer {
+  name: string;
+  description: string;
+  modules: string[];
+  files: string[];
 }
 
 export interface DeepDiveExplanation {
@@ -41,6 +63,11 @@ export interface AnalysisRisk {
   mitigation: string;
   percentage?: number;
   category?: string;
+  evidence?: string;
+  filePath?: string;
+  confidence?: number;
+  status?: 'CONFIRMED AST' | 'INFERRED RISK';
+  whyItMatters?: string;
 }
 
 export interface EvidenceItem {
@@ -53,6 +80,10 @@ export interface KeyModule {
   name: string;
   path: string;
   responsibility: string;
+  dependencies?: string[];
+  relatedModules?: string[];
+  keyFunctions?: string[];
+  evidence?: string;
 }
 
 export interface FileExplanation {
@@ -108,4 +139,51 @@ export interface ComplexFile {
   size: number;
   lines: number;
   reason: string;
+}
+
+export type DependencyNodeType =
+  | 'entry'
+  | 'route'
+  | 'controller'
+  | 'service'
+  | 'component'
+  | 'storage'
+  | 'ai'
+  | 'utility'
+  | 'config';
+
+export interface DependencyGraphNode {
+  id: string;
+  label: string;
+  path: string;
+  type: DependencyNodeType;
+  description: string;
+  imports: string[];
+  resolvedImports: string[];
+  importedBy: string[];
+  exports: string[];
+  loc: number;
+  status: 'confirmed' | 'inferred';
+  layer?: string;
+}
+
+export interface DependencyGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: 'import' | 'dataflow' | 'call';
+  label?: string;
+  animated?: boolean;
+}
+
+export interface DependencyGraphData {
+  nodes: DependencyGraphNode[];
+  edges: DependencyGraphEdge[];
+  summary: {
+    totalNodes: number;
+    totalEdges: number;
+    entryPoints: string[];
+    isolatedNodes: number;
+    density: number;
+  };
 }

@@ -13,6 +13,7 @@ export const API_ENDPOINTS = {
   FILE_EXPLANATION: (sessionId: string) => `/api/analysis/${sessionId}/file-explanation`,
   BUG_DETECTION: (sessionId: string) => `/api/analysis/${sessionId}/bug-detection`,
   FLOW_DIAGRAM: (sessionId: string) => `/api/analysis/${sessionId}/flow-diagram`,
+  GET_DEPENDENCIES: (sessionId: string) => `/api/analysis/${sessionId}/dependencies`,
   CHAT_MESSAGE: (sessionId: string) => `/api/chat/${sessionId}/message`,
   CHAT_HISTORY: (sessionId: string) => `/api/chat/${sessionId}/history`,
 } as const;

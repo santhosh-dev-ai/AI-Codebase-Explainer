@@ -52,6 +52,41 @@ export class OpenAIService {
         return content;
       } catch (error: any) {
         const errorMsg = error instanceof Error ? error.message : String(error);
+
+        // Immediate fail for invalid credentials - do not retry invalid credentials
+        const isAuthError =
+          errorMsg.includes('401') ||
+          errorMsg.includes('invalid_api_key') ||
+          errorMsg.includes('Incorrect API key') ||
+          errorMsg.includes('Authentication');
+        if (isAuthError) {
+          logger.error('Invalid AI API credentials, bypassing retries', {
+            model: currentModel,
+            error: errorMsg,
+          });
+          throw new Error(`AI Provider Authentication Failed: ${errorMsg}`);
+        }
+
+        // Context / Token limit error: Try fast model or throw to trigger deterministic fallback
+        const isTokenLimitError =
+          errorMsg.includes('413') ||
+          errorMsg.includes('Request too large') ||
+          errorMsg.includes('TPM') ||
+          errorMsg.includes('maximum context length');
+        if (isTokenLimitError && !hasFallenBack && currentModel !== fallbackModel) {
+          logger.warn(`Context/TPM limit exceeded on ${currentModel}, falling back to ${fallbackModel}`, {
+            error: errorMsg,
+          });
+          currentModel = fallbackModel;
+          hasFallenBack = true;
+          continue;
+        } else if (isTokenLimitError) {
+          logger.warn('Token limit exceeded across models, falling back to deterministic analysis', {
+            error: errorMsg,
+          });
+          throw new Error(`AI Token Limit Exceeded: ${errorMsg}`);
+        }
+
         const isModelNotFoundError =
           errorMsg.includes('404') ||
           errorMsg.includes('does not exist') ||
@@ -78,7 +113,7 @@ export class OpenAIService {
           errorMsg.includes('ECONNRESET');
 
         if (isTransient && attempt < maxRetries) {
-          const delay = (AI_CONFIG.retryDelay || 1000) * Math.pow(2, attempt - 1);
+          const delay = (AI_CONFIG.retryDelay || 1500) * Math.pow(2, attempt - 1);
           logger.warn(`AI request failed on attempt ${attempt}, retrying in ${delay}ms...`, {
             model: currentModel,
             error: errorMsg,

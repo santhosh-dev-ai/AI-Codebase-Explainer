@@ -1,54 +1,47 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
   Copy,
   Check,
-  BrainCircuit,
+  Search,
   Wand2,
   Code2,
   Loader2,
   Sparkles,
+  MessageSquare,
+  X,
 } from 'lucide-react';
 import { formatBytes, getFileIcon } from '@/lib/utils';
-import type { FileExplanation } from '@/types/analysis.types';
 import type { FileContentData, SelectionExplainState } from './workspace.types';
-import { FileInsightDrawer } from './FileInsightDrawer';
 
 interface CodeViewerPaneProps {
   selectedFile: FileContentData | null;
   isLoadingFile: boolean;
-  fileInsight: FileExplanation | null;
-  isLoadingFileInsight: boolean;
-  fileInsightError: string;
-  onRetryFileInsight: () => void;
   onExplainSelection: (snippet: string) => Promise<void>;
+  onAskAboutSelection?: (snippet: string) => void;
   isExplainingSelection: boolean;
   selectionExplanation: string;
   onDismissSelectionExplanation: () => void;
+  onOpenInspectorTab?: (tab: 'explain' | 'architecture' | 'insights' | 'risks' | 'overview') => void;
 }
 
 export function CodeViewerPane({
   selectedFile,
   isLoadingFile,
-  fileInsight,
-  isLoadingFileInsight,
-  fileInsightError,
-  onRetryFileInsight,
   onExplainSelection,
+  onAskAboutSelection,
   isExplainingSelection,
   selectionExplanation,
   onDismissSelectionExplanation,
+  onOpenInspectorTab: _onOpenInspectorTab,
 }: CodeViewerPaneProps) {
   const [copied, setCopied] = useState(false);
-  const [isInsightOpen, setIsInsightOpen] = useState(false);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
-      setIsInsightOpen(true);
-    }
-  }, []);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [fileSearchTerm, setFileSearchTerm] = useState('');
   const [selectionTooltip, setSelectionTooltip] = useState<SelectionExplainState | null>(null);
+
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const handleCopy = async () => {
     if (!selectedFile?.content) return;
@@ -69,7 +62,7 @@ export function CodeViewerPane({
     }
 
     const text = selection.toString().trim();
-    if (text.length < 5) {
+    if (text.length < 4) {
       setSelectionTooltip(null);
       return;
     }
@@ -79,61 +72,74 @@ export function CodeViewerPane({
 
     setSelectionTooltip({
       x: rect.left + rect.width / 2,
-      y: rect.top - 10,
+      y: Math.max(10, rect.top - 12),
       snippet: text,
       lineStart: 1,
       lineEnd: 1,
     });
   };
 
-  const triggerExplainSelection = () => {
-    if (!selectionTooltip?.snippet) return;
-    onExplainSelection(selectionTooltip.snippet);
-    setSelectionTooltip(null);
-  };
+  const lines = useMemo(() => {
+    if (!selectedFile?.content) return [];
+    return selectedFile.content.split('\n');
+  }, [selectedFile?.content]);
+
+  // Match count for search in file
+  const searchMatchCount = useMemo(() => {
+    if (!fileSearchTerm.trim() || !selectedFile?.content) return 0;
+    const term = fileSearchTerm.toLowerCase();
+    let count = 0;
+    lines.forEach((line) => {
+      if (line.toLowerCase().includes(term)) count++;
+    });
+    return count;
+  }, [fileSearchTerm, selectedFile?.content, lines]);
 
   if (isLoadingFile) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-zinc-950/40 p-6">
+      <div className="flex-1 flex flex-col items-center justify-center bg-void/60 p-6 text-center select-none font-mono">
         <Loader2 className="w-8 h-8 text-cyan-400 animate-spin mb-3" />
-        <p className="text-xs text-zinc-300 font-medium">Loading file content...</p>
-        <p className="text-[11px] text-zinc-500">Preparing syntax and line mappings</p>
+        <p className="text-xs text-zinc-200 font-semibold">Streaming file AST & syntax...</p>
+        <p className="text-[11px] text-zinc-500 mt-1">Calculating line numbers and token scopes</p>
       </div>
     );
   }
 
   if (!selectedFile) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-zinc-950/30 text-center select-none">
-        <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-400/20 flex items-center justify-center mb-4">
-          <Code2 className="w-8 h-8 text-cyan-400" />
+      <div className="flex-1 flex flex-col items-center justify-center p-8 bg-void/40 text-center select-none">
+        <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-400/20 flex items-center justify-center mb-4 text-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.1)]">
+          <Code2 className="w-8 h-8" />
         </div>
-        <h3 className="text-sm font-semibold text-zinc-100 mb-1">Select a file to inspect</h3>
-        <p className="text-xs text-zinc-400 max-w-sm mb-4">
-          Click any file from the explorer on the left to view code and AI-powered architectural insights.
+        <h3 className="text-sm font-semibold text-zinc-100 mb-1">Select a file from Explorer</h3>
+        <p className="text-xs text-zinc-400 max-w-sm mb-4 leading-relaxed">
+          Click any source file in the left pane to view code syntax, trace functions, and inspect contextual AI analysis.
         </p>
-        <div className="flex items-center gap-2 text-[11px] text-zinc-500 bg-white/5 border border-white/10 px-3 py-1.5 rounded-lg">
+        <div className="flex items-center gap-2 text-[11px] text-zinc-400 bg-surface/80 border border-white/10 px-3 py-1.5 rounded-lg font-mono">
           <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-          <span>Tip: You can highlight any snippet of code to explain it instantly</span>
+          <span>Tip: Highlight any line or block to explain it instantly</span>
         </div>
       </div>
     );
   }
 
-  const lines = selectedFile.content.split('\n');
-
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-zinc-950/50 relative overflow-hidden">
-      {/* Code Viewer Header */}
-      <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/10 bg-white/5 flex-shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-white/10 text-cyan-300 border border-white/15">
+    <div
+      ref={containerRef}
+      className="flex-1 flex flex-col min-h-0 bg-void/50 relative overflow-hidden select-text"
+      onMouseUp={handleMouseUp}
+    >
+      {/* Code Viewer Toolbar */}
+      <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/10 bg-surface/50 flex-shrink-0 select-none">
+        {/* File Metadata */}
+        <div className="flex items-center gap-2 min-w-0 font-mono">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 text-cyan-300 border border-white/10">
             {getFileIcon(selectedFile.path)}
           </span>
-          <span className="text-xs font-mono font-medium text-zinc-100 truncate">
+          <span className="text-xs text-zinc-200 font-medium truncate">
             {selectedFile.path}
           </span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 border border-white/5 text-zinc-400">
             {selectedFile.language}
           </span>
           <span className="text-[10px] text-zinc-500 hidden sm:inline">
@@ -141,12 +147,26 @@ export function CodeViewerPane({
           </span>
         </div>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
+        {/* Action Controls */}
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {/* Find in file toggle */}
+          <button
+            onClick={() => setFileSearchOpen((prev) => !prev)}
+            className={`p-1.5 rounded text-xs transition-colors ${
+              fileSearchOpen
+                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+            }`}
+            title="Find in file"
+          >
+            <Search className="w-3.5 h-3.5" />
+          </button>
+
           {/* Copy Button */}
           <button
             onClick={handleCopy}
-            className="flex items-center gap-1 px-2 py-1 text-[11px] rounded bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 hover:text-zinc-100 transition-colors"
-            title="Copy code"
+            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono rounded bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 hover:text-zinc-100 transition-colors"
+            title="Copy file content"
           >
             {copied ? (
               <>
@@ -160,90 +180,119 @@ export function CodeViewerPane({
               </>
             )}
           </button>
-
-          {/* Toggle Docked Insights Drawer */}
-          <button
-            onClick={() => setIsInsightOpen((prev) => !prev)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-lg border transition-all ${
-              isInsightOpen
-                ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/40 shadow-[0_0_12px_rgba(34,211,238,0.2)]'
-                : 'bg-white/5 hover:bg-white/10 border-white/10 text-zinc-400 hover:text-zinc-200'
-            }`}
-            title="Toggle docked AI file insights"
-          >
-            <BrainCircuit className="w-3.5 h-3.5 text-cyan-400" />
-            <span>AI Insights</span>
-          </button>
         </div>
       </div>
 
-      {/* Main Body: Code Lines & Docked Insights Panel */}
-      <div className="flex-1 flex min-h-0 overflow-hidden relative">
-        {/* Code Content */}
-        <div
-          className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed select-text relative"
-          onMouseUp={handleMouseUp}
-        >
-          <pre className="inline-block min-w-full">
-            <code>
-              {lines.map((line, idx) => (
+      {/* In-File Search Bar */}
+      {fileSearchOpen && (
+        <div className="flex items-center gap-2 px-3.5 py-1.5 border-b border-white/10 bg-elevated/80 backdrop-blur-md select-none text-xs font-mono">
+          <Search className="w-3.5 h-3.5 text-zinc-400" />
+          <input
+            type="text"
+            value={fileSearchTerm}
+            onChange={(e) => setFileSearchTerm(e.target.value)}
+            placeholder="Find in current file..."
+            className="flex-1 bg-transparent text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
+            autoFocus
+          />
+          {fileSearchTerm && (
+            <span className="text-[10px] text-zinc-400">
+              {searchMatchCount} {searchMatchCount === 1 ? 'match' : 'matches'}
+            </span>
+          )}
+          <button
+            onClick={() => {
+              setFileSearchOpen(false);
+              setFileSearchTerm('');
+            }}
+            className="text-zinc-400 hover:text-zinc-200 p-1"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
+      {/* Code Viewer Body */}
+      <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
+        <pre className="inline-block min-w-full">
+          <code>
+            {lines.map((line, idx) => {
+              const lineNum = idx + 1;
+              const matchesSearch =
+                fileSearchTerm.trim().length > 0 &&
+                line.toLowerCase().includes(fileSearchTerm.toLowerCase());
+
+              return (
                 <div
                   key={idx}
-                  className="flex hover:bg-white/5 rounded px-1 transition-colors"
+                  className={`flex hover:bg-white/5 rounded px-1 transition-colors ${
+                    matchesSearch ? 'bg-cyan-500/15 border-l border-cyan-400' : ''
+                  }`}
                 >
-                  <span className="inline-block w-10 text-right pr-4 text-zinc-600 select-none flex-shrink-0 font-mono text-[11px]">
-                    {idx + 1}
+                  <span className="inline-block w-11 text-right pr-4 text-zinc-600 select-none flex-shrink-0 text-[11px]">
+                    {lineNum}
                   </span>
                   <span className="text-zinc-200 whitespace-pre font-mono">
                     {line || ' '}
                   </span>
                 </div>
-              ))}
-            </code>
-          </pre>
-        </div>
-
-        {/* Docked AI Insights Drawer (Side Panel, NOT Floating Overlay!) */}
-        <FileInsightDrawer
-          isOpen={isInsightOpen}
-          onClose={() => setIsInsightOpen(false)}
-          filePath={selectedFile.path}
-          insight={fileInsight}
-          isLoading={isLoadingFileInsight}
-          error={fileInsightError}
-          onRetry={onRetryFileInsight}
-        />
+              );
+            })}
+          </code>
+        </pre>
       </div>
 
-      {/* Code Selection Floating Action Pill */}
+      {/* Contextual Code Selection Action Pill */}
       {selectionTooltip && (
-        <button
-          onClick={triggerExplainSelection}
-          disabled={isExplainingSelection}
-          className="fixed z-50 -translate-x-1/2 -translate-y-full px-3 py-1.5 rounded-lg border border-cyan-400/30 bg-zinc-950/90 text-xs text-cyan-200 backdrop-blur-xl shadow-2xl hover:scale-105 transition-all flex items-center gap-1.5 disabled:opacity-60"
+        <div
+          className="fixed z-50 -translate-x-1/2 -translate-y-full px-1.5 py-1 rounded-xl border border-cyan-400/40 bg-surface/95 backdrop-blur-xl shadow-2xl flex items-center gap-1 text-xs select-none"
           style={{ left: selectionTooltip.x, top: selectionTooltip.y }}
         >
-          <Wand2 className="w-3.5 h-3.5 text-cyan-400" />
-          <span>{isExplainingSelection ? 'Explaining...' : 'Explain selected code'}</span>
-        </button>
+          <button
+            onClick={() => {
+              onExplainSelection(selectionTooltip.snippet);
+              setSelectionTooltip(null);
+            }}
+            disabled={isExplainingSelection}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-200 font-mono text-[11px] transition-colors"
+          >
+            <Wand2 className="w-3 h-3 text-cyan-400" />
+            <span>{isExplainingSelection ? 'Explaining...' : 'Explain selection'}</span>
+          </button>
+
+          {onAskAboutSelection && (
+            <button
+              onClick={() => {
+                onAskAboutSelection(selectionTooltip.snippet);
+                setSelectionTooltip(null);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg hover:bg-white/10 text-zinc-300 font-mono text-[11px] transition-colors"
+            >
+              <MessageSquare className="w-3 h-3 text-violet-400" />
+              <span>Ask AI</span>
+            </button>
+          )}
+        </div>
       )}
 
-      {/* Selection Explanation Popover */}
+      {/* Inline Selection Explanation Popover */}
       {selectionExplanation && (
-        <div className="absolute right-4 bottom-4 max-w-md rounded-xl border border-cyan-400/30 bg-zinc-950/95 backdrop-blur-xl p-4 shadow-2xl z-40">
+        <div className="absolute right-4 bottom-4 max-w-lg rounded-2xl border border-cyan-400/30 bg-surface/95 backdrop-blur-xl p-4 shadow-2xl z-40 select-text">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <Wand2 className="w-4 h-4 text-cyan-400" />
-              <p className="text-xs font-semibold text-cyan-100">Selection Explanation</p>
+              <p className="text-xs font-semibold text-cyan-200 font-mono">
+                Selection Explanation
+              </p>
             </div>
             <button
               onClick={onDismissSelectionExplanation}
-              className="text-zinc-500 hover:text-zinc-300 text-xs"
+              className="text-zinc-400 hover:text-zinc-200 p-1"
             >
-              ✕
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
-          <p className="text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto">
+          <p className="text-xs text-zinc-200 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
             {selectionExplanation}
           </p>
         </div>

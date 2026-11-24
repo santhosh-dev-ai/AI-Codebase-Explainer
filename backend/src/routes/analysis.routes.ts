@@ -59,4 +59,12 @@ router.post(
   analysisController.getFlowDiagram.bind(analysisController)
 );
 
+// Interactive Dependency Graph endpoint
+router.get(
+  '/:sessionId/dependencies',
+  rateLimiter,
+  validateSessionId,
+  analysisController.getDependencyGraph.bind(analysisController)
+);
+
 export default router;

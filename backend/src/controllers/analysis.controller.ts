@@ -84,6 +84,26 @@ export class AnalysisController {
       next(error);
     }
   }
+
+  async getDependencyGraph(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+
+      const dependencyGraph = analysisService.extractDependencyGraph(sessionId);
+      if (!dependencyGraph) {
+        throw createError('Session not found or empty codebase', 404);
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          dependencyGraph,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const analysisController = new AnalysisController();

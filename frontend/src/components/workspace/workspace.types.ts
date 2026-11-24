@@ -14,9 +14,15 @@ export interface FileContentData {
   size: number;
 }
 
-export type RightPanelTab = 'overview' | 'architecture' | 'insights' | 'risks' | 'dashboard';
+/** Primary Workspace View — only ONE active at a time */
+export type WorkspaceMainView = 'code' | 'architecture' | 'overview' | 'risks' | 'metrics';
 
-export type MobileTab = 'explorer' | 'code' | 'chat' | 'insights';
+/** Contextual AI Inspector Tabs */
+export type InspectorTab = 'explain' | 'architecture' | 'insights' | 'risks' | 'overview';
+
+export type RightPanelTab = 'overview' | 'architecture' | 'insights' | 'risks' | 'dashboard' | 'explain';
+
+export type MobileTab = 'explorer' | 'main' | 'inspector' | 'chat';
 
 export type LocalChatMessage = Pick<AppChatMessage, 'id' | 'role' | 'content' | 'timestamp'>;
 
