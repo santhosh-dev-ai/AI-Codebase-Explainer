@@ -134,7 +134,7 @@ export function OverviewCenterView({
             <div className="p-3 rounded-xl bg-void border border-white/5 space-y-1">
               <span className="text-[10px] text-zinc-500 uppercase tracking-wider block">Framework</span>
               <span className="text-sm font-semibold text-zinc-100 truncate block">
-                {overview.framework || 'Node.js'}
+                {overview.framework || (overview.primaryEcosystem === 'python' ? 'None (Python)' : 'None detected')}
               </span>
             </div>
             <div className="p-3 rounded-xl bg-void border border-white/5 space-y-1">

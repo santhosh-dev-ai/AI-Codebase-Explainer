@@ -13,7 +13,7 @@ export const corsOptions: cors.CorsOptions = {
         'http://127.0.0.1:3003',
       ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Token'],
   credentials: true,
   maxAge: 86400, // 24 hours
 };

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -23,7 +23,12 @@ import { API_ENDPOINTS } from '@/constants/config';
 import type { AnalyzeGitHubRequest, AnalyzeGitHubResponse } from '@/types/api.types';
 import { CodeIntelligenceGraph } from '@/components/landing/CodeIntelligenceGraph';
 import { ProductPreview } from '@/components/landing/ProductPreview';
-import { LatticeLoader, ShapeGrid } from '@/components/react-bits';
+import { LatticeLoader, ShapeGrid, PillNav, type PillNavItem } from '@/components/react-bits';
+
+const landingNavItems: PillNavItem[] = [
+  { label: 'How It Works', href: '#how-it-works' },
+  { label: 'Features', href: '#features' },
+];
 
 export default function HomePage() {
   const router = useRouter();
@@ -37,6 +42,73 @@ export default function HomePage() {
   const [loadingStep, setLoadingStep] = useState('');
   const [currentStageIndex, setCurrentStageIndex] = useState(0);
   const [error, setError] = useState('');
+  const [isScrolled, setIsScrolled] = useState(false);
+  const [activeSection, setActiveSection] = useState<string>('');
+
+  useEffect(() => {
+    const handleScroll = () => {
+      const scrollY =
+        window.scrollY ||
+        document.documentElement.scrollTop ||
+        document.body.scrollTop ||
+        0;
+      setIsScrolled(scrollY > 15);
+      if (scrollY < 250) {
+        setActiveSection('');
+      }
+    };
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
+    document.addEventListener('scroll', handleScroll, { passive: true, capture: true });
+    return () => {
+      window.removeEventListener('scroll', handleScroll, { capture: true });
+      document.removeEventListener('scroll', handleScroll, { capture: true });
+    };
+  }, []);
+
+  // Track active section for landing PillNav indicator
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.target.id) {
+            setActiveSection(`#${entry.target.id}`);
+          }
+        });
+      },
+      {
+        rootMargin: '-20% 0px -50% 0px',
+        threshold: 0.1,
+      }
+    );
+
+    const featuresEl = document.getElementById('features');
+    const howItWorksEl = document.getElementById('how-it-works');
+
+    if (featuresEl) observer.observe(featuresEl);
+    if (howItWorksEl) observer.observe(howItWorksEl);
+
+    return () => observer.disconnect();
+  }, []);
+
+  const handleLandingNavClick = (item: PillNavItem, _index: number, event: React.MouseEvent<HTMLElement>) => {
+    if (item.href?.startsWith('#')) {
+      event.preventDefault();
+      const targetId = item.href.slice(1);
+      const element = document.getElementById(targetId);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth' });
+        setActiveSection(item.href);
+      }
+    }
+  };
+
+  const handleScrollToTop = () => {
+    const scrollOptions: ScrollToOptions = { top: 0, behavior: 'smooth' };
+    window.scrollTo(scrollOptions);
+    if (document.documentElement) document.documentElement.scrollTo(scrollOptions);
+    if (document.body) document.body.scrollTo(scrollOptions);
+  };
 
   const analysisStages = [
     'Connecting to repository & checking fingerprint cache...',
@@ -95,6 +167,9 @@ export default function HomePage() {
         setCurrentStageIndex(5);
         setLoadingStep(analysisStages[5]);
         if (response.data) {
+          if (typeof window !== 'undefined' && response.data.sessionToken) {
+            sessionStorage.setItem(`session_token_${response.data.sessionId}`, response.data.sessionToken);
+          }
           router.push(`/analyze/${response.data.sessionId}`);
         }
       }, 600);
@@ -127,6 +202,9 @@ export default function HomePage() {
       );
 
       if (response.data) {
+        if (typeof window !== 'undefined' && response.data.sessionToken) {
+          sessionStorage.setItem(`session_token_${response.data.sessionId}`, response.data.sessionToken);
+        }
         router.push(`/analyze/${response.data.sessionId}`);
       }
     } catch (err) {
@@ -142,7 +220,7 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-void text-zinc-100 relative overflow-x-hidden selection:bg-cyan-500/30 selection:text-white">
+    <div className="min-h-screen bg-void text-zinc-100 relative overflow-x-clip selection:bg-cyan-500/30 selection:text-white">
       {/* Precision Background Atmosphere — React Bits Shape Grid */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden" aria-hidden="true">
         <ShapeGrid
@@ -215,40 +293,56 @@ export default function HomePage() {
         )}
       </AnimatePresence>
 
-      {/* Top Navigation */}
-      <header className="relative z-30 border-b border-white/5 bg-void/70 backdrop-blur-md">
+      {/* Top Navigation — Sticky Header */}
+      <header
+        className={`sticky top-0 z-40 transition-all duration-300 border-b ${
+          isScrolled
+            ? 'bg-void/85 backdrop-blur-md border-white/10 shadow-lg shadow-black/30'
+            : 'bg-void/60 backdrop-blur-sm border-white/5'
+        }`}
+      >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-violet-500/20 border border-cyan-400/30 flex items-center justify-center text-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.2)]">
-              <Terminal className="w-5 h-5" />
+          <button
+            type="button"
+            onClick={handleScrollToTop}
+            className="flex items-center gap-3 text-left group transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50 rounded-xl"
+            title="Scroll to top"
+            aria-label="AI Codebase Explainer - Scroll to top"
+          >
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-violet-500/20 border border-cyan-400/30 group-hover:border-cyan-400/60 flex items-center justify-center text-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.2)] group-hover:shadow-[0_0_20px_rgba(34,211,238,0.35)] transition-all flex-shrink-0">
+              <Terminal className="w-5 h-5 transition-transform group-hover:scale-105" />
             </div>
             <div>
-              <span className="font-semibold text-sm tracking-tight text-white flex items-center gap-2">
+              <span className="font-semibold text-sm tracking-tight text-white group-hover:text-cyan-200 transition-colors flex items-center gap-2">
                 AI Codebase Explainer
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-300 border border-cyan-400/20">
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-300 border border-cyan-400/20 group-hover:bg-cyan-400/20 transition-colors">
                   v2.0
                 </span>
               </span>
             </div>
-          </div>
+          </button>
 
-          <div className="flex items-center gap-4 text-xs font-mono text-zinc-400">
-            <span className="hidden sm:inline-flex items-center gap-1.5 text-zinc-400">
+          <div className="flex items-center gap-3">
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-mono text-zinc-400 px-2.5 py-1 rounded-full bg-white/5 border border-white/5">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               Engine Online
             </span>
-            <a
-              href="#how-it-works"
-              className="hover:text-zinc-200 transition-colors hidden md:inline"
-            >
-              How It Works
-            </a>
-            <a
-              href="#features"
-              className="hover:text-zinc-200 transition-colors hidden md:inline"
-            >
-              Features
-            </a>
+            <PillNav
+              items={landingNavItems}
+              activeHref={activeSection}
+              theme="dark"
+              layout="joined"
+              size="sm"
+              surface="glass"
+              itemStyle="pill"
+              hoverEffect="fill"
+              indicator="dot"
+              highlightColor="#22d3ee"
+              highlightTextColor="#09090b"
+              onItemClick={handleLandingNavClick}
+              ariaLabel="Landing Page Sections"
+              className="landing-pill-nav"
+            />
           </div>
         </div>
       </header>

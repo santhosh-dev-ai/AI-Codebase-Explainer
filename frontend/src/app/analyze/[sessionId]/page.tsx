@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, type FormEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { apiClient } from '@/lib/api-client';
-import { API_ENDPOINTS } from '@/constants/config';
+import { apiClient, clearSessionToken } from '@/lib/api-client';
+import { API_BASE_URL, API_ENDPOINTS } from '@/constants/config';
 import { prettyPrintLanguage } from '@/lib/utils';
 import type { FileNode, RepoMetadata } from '@/types/codebase.types';
 import type { ArchitectureOverview, AnalysisRisk, FileExplanation } from '@/types/analysis.types';
@@ -104,6 +104,8 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
   const [isLoadingChatHistory, setIsLoadingChatHistory] = useState(true);
   const [chatInput, setChatInput] = useState('');
   const [isSendingChat, setIsSendingChat] = useState(false);
+  const [isStreamingChat, setIsStreamingChat] = useState(false);
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
   const [chatError, setChatError] = useState('');
   const [promptSeed] = useState(() => Date.now());
 
@@ -171,9 +173,15 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
           handleFileClick(initial, initialView !== 'code');
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       const message = err instanceof Error ? err.message : 'Failed to load file tree';
-      if (/session not found|session expired/i.test(message)) {
+      const isAuthError =
+        err?.statusCode === 401 ||
+        err?.statusCode === 403 ||
+        /session not found|session expired|session access token|unauthorized|invalid or expired session/i.test(message);
+
+      if (isAuthError) {
+        clearSessionToken(sessionId);
         router.replace('/?error=session-expired');
         return;
       }
@@ -189,7 +197,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
 
   // Fetch Contextual File AI Insight
   const fetchFileInsight = useCallback(
-    async (filePathToFetch?: string) => {
+    async (filePathToFetch?: string, forceRefresh = false) => {
       const targetPath = filePathToFetch || selectedFile?.path;
       if (!targetPath) {
         setFileInsight(null);
@@ -197,7 +205,9 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
         return;
       }
 
-      if (fileInsightCache.current.has(targetPath)) {
+      if (forceRefresh) {
+        fileInsightCache.current.delete(targetPath);
+      } else if (fileInsightCache.current.has(targetPath)) {
         setFileInsight(fileInsightCache.current.get(targetPath)!);
         setFileInsightError('');
         return;
@@ -213,7 +223,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
         }>(API_ENDPOINTS.FILE_EXPLANATION(sessionId), { filePath: targetPath });
 
         const explanation = response.data?.fileExplanation || response.data?.explanation || null;
-        if (explanation) {
+        if (explanation && explanation.analysisMode !== 'deterministic') {
           fileInsightCache.current.set(targetPath, explanation);
         }
         setFileInsight(explanation);
@@ -278,12 +288,22 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
       if (response.data?.overview) {
         setOverview(response.data.overview);
       }
-    } catch (err) {
-      setOverviewError(err instanceof Error ? err.message : 'Failed to load architecture overview');
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : 'Failed to load architecture overview';
+      if (
+        err?.statusCode === 401 ||
+        err?.statusCode === 403 ||
+        /session not found|session expired|session access token|unauthorized/i.test(message)
+      ) {
+        clearSessionToken(sessionId);
+        router.replace('/?error=session-expired');
+        return;
+      }
+      setOverviewError(message);
     } finally {
       setIsLoadingOverview(false);
     }
-  }, [sessionId]);
+  }, [sessionId, router]);
 
   useEffect(() => {
     fetchOverview();
@@ -317,12 +337,12 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
     fetchChatHistory();
   }, [fetchChatHistory]);
 
-  // Scroll chat to bottom on new messages
+  // Scroll chat to bottom initially when history finishes restoring
   useEffect(() => {
-    if (chatScrollRef.current) {
+    if (!isLoadingChatHistory && chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
-  }, [chatMessages, isLoadingChatHistory]);
+  }, [isLoadingChatHistory]);
 
   // Keyboard Shortcuts (Ctrl+B / Ctrl+I / Ctrl+K / Ctrl+F)
   useEffect(() => {
@@ -422,9 +442,15 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
   const totalFolders = useMemo(() => countDirectories(fileTree), [fileTree]);
 
   const estimatedLoc = useMemo(() => {
+    if (overview?.codeMetrics?.summary?.codeLines !== undefined) {
+      return overview.codeMetrics.summary.codeLines;
+    }
+    if (metadata?.metrics?.codeLines !== undefined) {
+      return metadata.metrics.codeLines;
+    }
     if (!metadata) return 0;
     return Math.round(metadata.totalSize / 42);
-  }, [metadata]);
+  }, [overview?.codeMetrics, metadata]);
 
   const dominantLanguage = useMemo(() => {
     if (!metadata) return 'Unknown';
@@ -558,13 +584,37 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
     [overview?.evidence, flattenedFiles]
   );
 
-  // Send AI Chat Message
+  const stopChatStreaming = useCallback(() => {
+    if (chatAbortControllerRef.current) {
+      chatAbortControllerRef.current.abort();
+      chatAbortControllerRef.current = null;
+    }
+    setIsSendingChat(false);
+    setIsStreamingChat(false);
+    setChatMessages((prev) =>
+      prev.map((msg) =>
+        msg.isStreaming ? { ...msg, isStreaming: false, isInterrupted: true } : msg
+      )
+    );
+  }, []);
+
+  // Send AI Chat Message with Real-Time End-to-End Streaming
   const sendChatMessage = useCallback(
     async (messageText: string) => {
       if (!messageText.trim()) return;
 
+      // Abort any previous stream
+      if (chatAbortControllerRef.current) {
+        chatAbortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      chatAbortControllerRef.current = abortController;
+
+      const userMessageId = `u-${Date.now()}`;
+      const assistantMessageId = `a-${Date.now()}`;
+
       const userMessage: LocalChatMessage = {
-        id: `u-${Date.now()}`,
+        id: userMessageId,
         role: 'user',
         content: messageText.trim(),
         timestamp: new Date(),
@@ -572,43 +622,215 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
 
       setChatMessages((prev) => [...prev, userMessage]);
       setIsSendingChat(true);
+      setIsStreamingChat(false);
       setChatError('');
 
+      // When user sends a message, scroll so the user message and assistant placeholder are visible
+      requestAnimationFrame(() => {
+        if (chatScrollRef.current) {
+          chatScrollRef.current.scrollTo({
+            top: chatScrollRef.current.scrollHeight,
+            behavior: 'smooth',
+          });
+        }
+      });
+
+      let accumulatedText = '';
+      let hasStartedStreaming = false;
+      let connectionTimeout: NodeJS.Timeout | null = null;
+      let inactivityTimeout: NodeJS.Timeout | null = null;
+      let isTimeoutAbort = false;
+      let streamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+      const resetInactivityTimeout = () => {
+        if (inactivityTimeout) clearTimeout(inactivityTimeout);
+        inactivityTimeout = setTimeout(() => {
+          isTimeoutAbort = true;
+          abortController.abort(new Error('AI stream timed out due to inactivity'));
+        }, 30000);
+      };
+
       try {
-        const response = await apiClient.post<{
-          response?: string;
-          answer?: string;
-          message?: string;
-        }>(API_ENDPOINTS.CHAT_MESSAGE(sessionId), {
-          message: messageText,
-          context: {
-            currentFile: selectedFile?.path,
-            relatedFiles: Array.from(highlightedPaths).slice(0, 8),
-          },
+        // 20-second connection-establishment timeout
+        connectionTimeout = setTimeout(() => {
+          isTimeoutAbort = true;
+          abortController.abort(new Error('Connection timed out waiting for AI response'));
+        }, 20000);
+
+        const streamUrl = `${API_BASE_URL}${API_ENDPOINTS.CHAT_MESSAGE_STREAM(sessionId)}`;
+        const sessionToken = typeof window !== 'undefined' ? sessionStorage.getItem(`session_token_${sessionId}`) : null;
+        const requestHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        };
+        if (sessionToken) {
+          requestHeaders['X-Session-Token'] = sessionToken;
+          requestHeaders['Authorization'] = `Bearer ${sessionToken}`;
+        }
+
+        const response = await fetch(streamUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          credentials: 'include',
+          body: JSON.stringify({
+            message: messageText,
+            context: {
+              currentFile: selectedFile?.path,
+              relatedFiles: Array.from(highlightedPaths).slice(0, 8),
+            },
+          }),
+          signal: abortController.signal,
         });
 
-        const assistantText =
-          response.data?.response ||
-          response.data?.answer ||
-          response.data?.message ||
-          'No response returned.';
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(
+            errorData.error ||
+            errorData.message ||
+            `HTTP ${response.status}: Failed to connect to AI streaming service`
+          );
+        }
 
-        const assistantMessage: LocalChatMessage = {
-          id: `a-${Date.now()}`,
-          role: 'assistant',
-          content: assistantText,
-          timestamp: new Date(),
-        };
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('ReadableStream not supported by browser');
+        }
+        streamReader = reader;
 
-        setChatMessages((prev) => [...prev, assistantMessage]);
-      } catch (err) {
-        const rawMsg = err instanceof Error ? err.message : 'Failed to send message';
-        const msg = /session not found/i.test(rawMsg)
-          ? 'Session expired. Please re-analyze repository.'
-          : rawMsg;
-        setChatError(msg);
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          // Clear connection timeout once data stream begins flowing
+          if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+            connectionTimeout = null;
+          }
+          resetInactivityTimeout();
+
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || '';
+
+          for (const event of events) {
+            const trimmed = event.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const jsonStr = trimmed.slice(5).trim();
+            if (!jsonStr) continue;
+
+            try {
+              const parsed = JSON.parse(jsonStr);
+
+              if (parsed.type === 'chunk' && typeof parsed.content === 'string') {
+                accumulatedText += parsed.content;
+
+                if (!hasStartedStreaming) {
+                  hasStartedStreaming = true;
+                  setIsStreamingChat(true);
+
+                  setChatMessages((prev) => [
+                    ...prev,
+                    {
+                      id: assistantMessageId,
+                      role: 'assistant',
+                      content: accumulatedText,
+                      timestamp: new Date(),
+                      isStreaming: true,
+                    },
+                  ]);
+                } else {
+                  setChatMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMessageId
+                        ? { ...m, content: accumulatedText }
+                        : m
+                    )
+                  );
+                }
+              } else if (parsed.type === 'done') {
+                const finalContent = parsed.response || accumulatedText;
+                setChatMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantMessageId
+                      ? {
+                          ...m,
+                          content: finalContent,
+                          isStreaming: false,
+                          references: parsed.references,
+                        }
+                      : m
+                  )
+                );
+              } else if (parsed.type === 'error') {
+                throw new Error(parsed.error || 'AI streaming error');
+              }
+            } catch (parseErr: any) {
+              if (parseErr.message && !parseErr.message.includes('Unexpected token')) {
+                throw parseErr;
+              }
+            }
+          }
+        }
+
+        // Finalize streaming flag if done event was implicit or stream closed
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId && m.isStreaming
+              ? { ...m, isStreaming: false }
+              : m
+          )
+        );
+      } catch (err: any) {
+        if (isTimeoutAbort || err?.message?.includes('timed out')) {
+          const timeoutMsg = 'Connection timed out. Upstream AI service did not respond in time. Please try again.';
+          setChatError(timeoutMsg);
+          setChatMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, isStreaming: false, isInterrupted: true, content: m.content ? `${m.content}\n\n[${timeoutMsg}]` : timeoutMsg }
+                : m
+            )
+          );
+        } else if (err.name === 'AbortError' || abortController.signal.aborted) {
+          // Response was deliberately stopped by the user
+          setChatMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, isStreaming: false, isInterrupted: true }
+                : m
+            )
+          );
+        } else {
+          const rawMsg = err instanceof Error ? err.message : 'Failed to send message';
+          const msg = /session not found|unauthorized|session expired/i.test(rawMsg)
+            ? 'Session expired. Please re-analyze repository.'
+            : rawMsg;
+          setChatError(msg);
+
+          if (hasStartedStreaming) {
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantMessageId
+                  ? { ...m, isStreaming: false, isInterrupted: true }
+                  : m
+              )
+            );
+          }
+        }
       } finally {
+        if (connectionTimeout) clearTimeout(connectionTimeout);
+        if (inactivityTimeout) clearTimeout(inactivityTimeout);
+        try {
+          streamReader?.releaseLock?.();
+        } catch {
+          // Ignore lock release error
+        }
         setIsSendingChat(false);
+        setIsStreamingChat(false);
+        chatAbortControllerRef.current = null;
       }
     },
     [sessionId, selectedFile?.path, highlightedPaths]
@@ -740,14 +962,20 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
 
       {/* 2. Main 3-Panel Workspace Layout */}
       <div ref={mainLayoutRef} className="flex-1 flex min-h-0 overflow-hidden relative">
-        {/* Left Panel: File Explorer */}
-        {isExplorerOpen && (
-          <div
-            style={{ width: `${leftPaneWidth}px` }}
-            className={`h-full flex-shrink-0 ${
-              mobileTab === 'explorer' ? 'flex w-full lg:w-auto' : 'hidden lg:flex'
-            }`}
-          >
+        {/* Left Panel: File Explorer with Smooth Slide Transition */}
+        <div
+          style={{
+            width: isExplorerOpen ? `${leftPaneWidth}px` : '0px',
+            opacity: isExplorerOpen ? 1 : 0,
+            visibility: isExplorerOpen || mobileTab === 'explorer' ? 'visible' : 'hidden',
+            pointerEvents: isExplorerOpen || mobileTab === 'explorer' ? 'auto' : 'none',
+            transition: draggingPane === 'left' ? 'none' : 'width 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease',
+          }}
+          className={`h-full flex-shrink-0 overflow-hidden select-none will-change-[width,opacity] ${
+            mobileTab === 'explorer' ? 'flex w-full lg:w-auto !opacity-100 !visible !pointer-events-auto' : 'hidden lg:flex'
+          }`}
+        >
+          <div style={{ width: `${leftPaneWidth}px` }} className="h-full flex-shrink-0">
             <ExplorerPane
               nodes={displayedTree}
               isLoading={isLoadingTree}
@@ -760,18 +988,22 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
               onCollapseAll={collapseAllFolders}
             />
           </div>
-        )}
+        </div>
 
         {/* Resizer Handle: Left */}
-        {isExplorerOpen && (
-          <div
-            className={`hidden lg:block w-1 hover:w-1.5 bg-white/5 hover:bg-cyan-400/50 cursor-col-resize transition-all ${
-              draggingPane === 'left' ? 'bg-cyan-400' : ''
-            }`}
-            onMouseDown={() => setDraggingPane('left')}
-            title="Drag to resize explorer"
-          />
-        )}
+        <div
+          style={{
+            opacity: isExplorerOpen ? 1 : 0,
+            pointerEvents: isExplorerOpen ? 'auto' : 'none',
+            width: isExplorerOpen ? '4px' : '0px',
+            transition: 'opacity 200ms ease, width 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+          }}
+          className={`hidden lg:block bg-white/5 hover:bg-cyan-400/50 cursor-col-resize flex-shrink-0 transition-colors ${
+            draggingPane === 'left' ? 'bg-cyan-400' : ''
+          }`}
+          onMouseDown={() => setDraggingPane('left')}
+          title="Drag to resize explorer"
+        />
 
         {/* Center Panel: Main Workspace Content (Only ONE active at a time!) */}
         <main
@@ -851,6 +1083,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
                 complexityData={complexityData}
                 folderTreemapData={folderTreemapData}
                 riskBreakdown={riskBreakdown}
+                codeMetrics={overview?.codeMetrics}
               />
             )}
           </div>
@@ -861,6 +1094,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
             onToggleOpen={() => setIsChatOpen((prev) => !prev)}
             chatHeight={mobileTab === 'chat' ? 500 : chatPanelHeight}
             onResizeStart={() => setIsDraggingChatSlider(true)}
+            isResizing={isDraggingChatSlider}
             chatScrollRef={chatScrollRef}
             isLoadingChatHistory={isLoadingChatHistory}
             chatMessages={chatMessages}
@@ -872,28 +1106,40 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
             setChatInput={setChatInput}
             selectedFilePath={selectedFile?.path}
             isSendingChat={isSendingChat}
+            isStreaming={isStreamingChat}
+            onStopStreaming={stopChatStreaming}
           />
         </main>
 
         {/* Resizer Handle: Right */}
-        {isInspectorOpen && (
-          <div
-            className={`hidden lg:block w-1 hover:w-1.5 bg-white/5 hover:bg-cyan-400/50 cursor-col-resize transition-all ${
-              draggingPane === 'right' ? 'bg-cyan-400' : ''
-            }`}
-            onMouseDown={() => setDraggingPane('right')}
-            title="Drag to resize inspector"
-          />
-        )}
+        <div
+          style={{
+            opacity: isInspectorOpen ? 1 : 0,
+            pointerEvents: isInspectorOpen ? 'auto' : 'none',
+            width: isInspectorOpen ? '4px' : '0px',
+            transition: 'opacity 200ms ease, width 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+          }}
+          className={`hidden lg:block bg-white/5 hover:bg-cyan-400/50 cursor-col-resize flex-shrink-0 transition-colors ${
+            draggingPane === 'right' ? 'bg-cyan-400' : ''
+          }`}
+          onMouseDown={() => setDraggingPane('right')}
+          title="Drag to resize inspector"
+        />
 
-        {/* Right Panel: ONE Contextual Unified AI Inspector */}
-        {isInspectorOpen && (
-          <div
-            style={{ width: `${rightPaneWidth}px` }}
-            className={`h-full flex-shrink-0 ${
-              mobileTab === 'inspector' ? 'flex w-full lg:w-auto' : 'hidden lg:flex'
-            }`}
-          >
+        {/* Right Panel: ONE Contextual Unified AI Inspector with Smooth Slide Transition */}
+        <div
+          style={{
+            width: isInspectorOpen ? `${rightPaneWidth}px` : '0px',
+            opacity: isInspectorOpen ? 1 : 0,
+            visibility: isInspectorOpen || mobileTab === 'inspector' ? 'visible' : 'hidden',
+            pointerEvents: isInspectorOpen || mobileTab === 'inspector' ? 'auto' : 'none',
+            transition: draggingPane === 'right' ? 'none' : 'width 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease',
+          }}
+          className={`h-full flex-shrink-0 overflow-hidden select-none will-change-[width,opacity] ${
+            mobileTab === 'inspector' ? 'flex w-full lg:w-auto !opacity-100 !visible !pointer-events-auto' : 'hidden lg:flex'
+          }`}
+        >
+          <div style={{ width: `${rightPaneWidth}px` }} className="h-full flex-shrink-0">
             <UnifiedAIInspector
               activeTab={activeInspectorTab}
               onSelectTab={setActiveInspectorTab}
@@ -901,7 +1147,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
               fileInsight={fileInsight}
               isLoadingFileInsight={isLoadingFileInsight}
               fileInsightError={fileInsightError}
-              onRetryFileInsight={() => selectedFile?.path && fetchFileInsight(selectedFile.path)}
+              onRetryFileInsight={() => selectedFile?.path && fetchFileInsight(selectedFile.path, true)}
               overview={overview}
               isLoadingOverview={isLoadingOverview}
               overviewError={overviewError}
@@ -925,7 +1171,7 @@ export default function AnalyzePage({ params }: AnalyzePageProps) {
               onClose={() => setIsInspectorOpen(false)}
             />
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

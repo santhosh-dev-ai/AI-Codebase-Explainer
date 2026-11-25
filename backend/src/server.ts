@@ -1,8 +1,16 @@
+import dns from 'dns';
 import { createApp } from './app';
 import config, { validateConfig } from './config/env.config';
 import logger from './utils/logger.util';
 import { sessionService } from './services/storage/session.service';
 import type { Server } from 'http';
+
+// Prefer IPv4 for DNS resolution to avoid dual-stack/IPv6 lookup delays or resolution drops
+try {
+  dns.setDefaultResultOrder?.('ipv4first');
+} catch {
+  // Ignore on older Node runtimes
+}
 
 // Validate environment configuration
 try {

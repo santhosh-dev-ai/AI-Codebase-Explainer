@@ -47,6 +47,17 @@ export function inferComplexityByFile(
   overview: ArchitectureOverview | null,
   files: Array<{ path: string }>
 ): Array<{ path: string; complexity: number }> {
+  // If measured AST cyclomatic complexity exists from code metrics engine, use it directly
+  if (
+    overview?.codeMetrics?.complexity?.topComplexFiles &&
+    overview.codeMetrics.complexity.topComplexFiles.length > 0
+  ) {
+    return overview.codeMetrics.complexity.topComplexFiles.map((cf) => ({
+      path: cf.path,
+      complexity: cf.complexity,
+    }));
+  }
+
   const scoreMap: Record<string, number> = {};
 
   const bump = (path: string, amount: number) => {
@@ -69,8 +80,9 @@ export function inferComplexityByFile(
   });
 
   if (Object.keys(scoreMap).length === 0) {
-    files.slice(0, 8).forEach((f, index) => {
-      scoreMap[f.path] = 40 - index;
+    // When no AST complexity is measured, default to base McCabe complexity = 1
+    files.slice(0, 8).forEach((f) => {
+      scoreMap[f.path] = 1;
     });
   }
 
@@ -82,8 +94,23 @@ export function inferComplexityByFile(
 export function inferRiskFiles(
   risk: AnalysisRisk,
   evidence: EvidenceItem[],
-  files: Array<{ path: string }>
+  _files: Array<{ path: string }>
 ): string[] {
+  const directFiles: string[] = [];
+  if (Array.isArray(risk.sourceReferences)) {
+    for (const ref of risk.sourceReferences) {
+      if (ref.filePath && !directFiles.includes(ref.filePath)) {
+        directFiles.push(ref.filePath);
+      }
+    }
+  }
+  if (risk.filePath && risk.filePath !== 'root' && !directFiles.includes(risk.filePath)) {
+    directFiles.push(risk.filePath);
+  }
+  if (directFiles.length > 0) {
+    return directFiles.slice(0, 10);
+  }
+
   const tokens = `${risk.title} ${risk.detail}`
     .toLowerCase()
     .split(/[^a-z0-9/_.-]+/)
@@ -100,11 +127,12 @@ export function inferRiskFiles(
     return Array.from(new Set(matched)).slice(0, 10);
   }
 
-  return files.slice(0, 5).map((item) => item.path);
+  // Never fabricate unrelated file associations when no concrete evidence matched
+  return [];
 }
 
 export function buildArchitectureGraph(steps: string[]): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const fallbackSteps = steps.length > 0 ? steps : ['Client / UI', 'API Gateway', 'Core Services', 'Data Layer'];
+  const fallbackSteps = steps.length > 0 ? steps : ['Entry (Unmapped)', 'Core Modules'];
 
   const nodes: FlowNode[] = fallbackSteps.map((step, index) => ({
     id: `${index}`,

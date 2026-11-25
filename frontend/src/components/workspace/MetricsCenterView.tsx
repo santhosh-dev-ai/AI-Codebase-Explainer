@@ -23,7 +23,10 @@ import {
   ShieldAlert,
   Server,
   Binary,
+  FlaskConical,
+  FileCode2,
 } from 'lucide-react';
+import type { RepositoryMetrics } from '@/types/analysis.types';
 
 interface MetricsCenterViewProps {
   totalFiles: number;
@@ -35,6 +38,7 @@ interface MetricsCenterViewProps {
   complexityData: Array<{ path: string; complexity: number }>;
   folderTreemapData?: Array<{ name: string; size: number }>;
   riskBreakdown: { high: number; medium: number; low: number };
+  codeMetrics?: RepositoryMetrics;
 }
 
 export function MetricsCenterView({
@@ -46,7 +50,16 @@ export function MetricsCenterView({
   filesPerFolderData,
   complexityData,
   riskBreakdown,
+  codeMetrics,
 }: MetricsCenterViewProps) {
+  const isLocMeasured = codeMetrics?.summary?.locProvenance === 'measured';
+  const displayLoc = isLocMeasured
+    ? codeMetrics!.summary.codeLines
+    : estimatedLoc;
+
+  const testIntel = codeMetrics?.testIntelligence;
+  const complexitySummary = codeMetrics?.complexity;
+
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 font-mono text-xs select-none">
       {/* SECTION 1: PHYSICAL REPOSITORY TELEMETRY */}
@@ -56,43 +69,184 @@ export function MetricsCenterView({
             <Server className="w-3.5 h-3.5 text-cyan-400" />
             <span>Repository Inventory Telemetry</span>
           </div>
-          <span className="text-[10px] text-zinc-500 font-mono">EXTRACTED DIRECTLY FROM SOURCE FILES</span>
+          <span className="text-[10px] text-zinc-500 font-mono">
+            {isLocMeasured ? 'PARSED DIRECTLY FROM SOURCE CODE' : 'ESTIMATED FROM REPOSITORY ARTIFACTS'}
+          </span>
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1 hover:border-cyan-400/30 transition-all">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
-              <FileSearch className="w-4 h-4 text-cyan-400" />
-              <span>Total Files</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
+                <FileSearch className="w-4 h-4 text-cyan-400" />
+                <span>Total Files</span>
+              </div>
+              <span className="px-1.5 py-0.5 rounded text-[9px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                Measured
+              </span>
             </div>
             <p className="text-2xl font-bold text-white tracking-tight">{totalFiles}</p>
+            <p className="text-[10px] text-zinc-500">Indexed source & config files</p>
           </div>
 
           <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1 hover:border-emerald-400/30 transition-all">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
-              <Layers className="w-4 h-4 text-emerald-400" />
-              <span>Total Folders</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
+                <Layers className="w-4 h-4 text-emerald-400" />
+                <span>Total Folders</span>
+              </div>
+              <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                Measured
+              </span>
             </div>
             <p className="text-2xl font-bold text-white tracking-tight">{totalFolders}</p>
+            <p className="text-[10px] text-zinc-500">Directory tree structure</p>
           </div>
 
           <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1 hover:border-amber-400/30 transition-all">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
-              <Code2 className="w-4 h-4 text-amber-400" />
-              <span>Estimated LOC</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
+                <Code2 className="w-4 h-4 text-amber-400" />
+                <span>{isLocMeasured ? 'Code Lines (LOC)' : 'Estimated LOC'}</span>
+              </div>
+              <span
+                className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                  isLocMeasured
+                    ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                }`}
+              >
+                {isLocMeasured ? 'Measured' : 'Estimated'}
+              </span>
             </div>
-            <p className="text-2xl font-bold text-white tracking-tight">{estimatedLoc.toLocaleString()}</p>
+            <p className="text-2xl font-bold text-white tracking-tight">{displayLoc.toLocaleString()}</p>
+            <p className="text-[10px] text-zinc-500">
+              {isLocMeasured
+                ? `${codeMetrics?.summary?.totalLines.toLocaleString()} total physical lines`
+                : 'Heuristic byte estimate'}
+            </p>
           </div>
 
           <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1 hover:border-indigo-400/30 transition-all">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
-              <PieChartIcon className="w-4 h-4 text-indigo-400" />
-              <span>Top Language</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-zinc-400 text-xs">
+                <PieChartIcon className="w-4 h-4 text-indigo-400" />
+                <span>Top Language</span>
+              </div>
+              <span className="px-1.5 py-0.5 rounded text-[9px] bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                Measured
+              </span>
             </div>
             <p className="text-2xl font-bold text-cyan-300 tracking-tight truncate">{dominantLanguage}</p>
+            <p className="text-[10px] text-zinc-500">Dominant codebase ecosystem</p>
           </div>
         </div>
+
+        {/* ACCURATE LINES OF CODE BREAKDOWN SUB-PANEL */}
+        {codeMetrics?.summary && (
+          <div className="p-4 rounded-2xl border border-white/10 bg-surface/40 backdrop-blur-md space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileCode2 className="w-4 h-4 text-cyan-400" />
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-white">
+                  Language-Aware Lines of Code Breakdown
+                </h4>
+              </div>
+              <span className="px-2 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                Exact Syntax Parse
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="p-3 rounded-xl border border-white/5 bg-black/20 space-y-1">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Executable Code</span>
+                <p className="text-lg font-bold text-emerald-300">{codeMetrics.summary.codeLines.toLocaleString()}</p>
+                <p className="text-[9px] text-zinc-500">Excludes pure comments</p>
+              </div>
+
+              <div className="p-3 rounded-xl border border-white/5 bg-black/20 space-y-1">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Comments</span>
+                <p className="text-lg font-bold text-cyan-300">{codeMetrics.summary.commentLines.toLocaleString()}</p>
+                <p className="text-[9px] text-zinc-500">Single & block comments</p>
+              </div>
+
+              <div className="p-3 rounded-xl border border-white/5 bg-black/20 space-y-1">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Blank Lines</span>
+                <p className="text-lg font-bold text-zinc-300">{codeMetrics.summary.blankLines.toLocaleString()}</p>
+                <p className="text-[9px] text-zinc-500">Whitespace formatting</p>
+              </div>
+
+              <div className="p-3 rounded-xl border border-white/5 bg-black/20 space-y-1">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Mixed Lines</span>
+                <p className="text-lg font-bold text-amber-300">{codeMetrics.summary.mixedLines.toLocaleString()}</p>
+                <p className="text-[9px] text-zinc-500">Inline code + comments</p>
+              </div>
+
+              <div className="p-3 rounded-xl border border-white/5 bg-black/20 space-y-1">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Total Physical</span>
+                <p className="text-lg font-bold text-white">{codeMetrics.summary.totalLines.toLocaleString()}</p>
+                <p className="text-[9px] text-zinc-500">Code + Blank + Comments</p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* SECTION 1B: TEST INTELLIGENCE */}
+      {testIntel && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-300">
+              <FlaskConical className="w-3.5 h-3.5 text-purple-400" />
+              <span>Test Intelligence & Coverage Status</span>
+            </div>
+            <span className="text-[10px] text-zinc-500 font-mono">STATIC FRAMEWORK & TEST DISCOVERY</span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1">
+              <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Test Files Detected</span>
+              <p className="text-2xl font-bold text-purple-300">{testIntel.testFilesDetected}</p>
+              <p className="text-[10px] text-zinc-500">Matched directory & naming specs</p>
+            </div>
+
+            <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1">
+              <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Test Cases Detected</span>
+              <p className="text-2xl font-bold text-purple-300">{testIntel.testCasesDetected}</p>
+              <p className="text-[10px] text-zinc-500">Parsed it(), test(), def test_*</p>
+            </div>
+
+            <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1">
+              <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Frameworks Detected</span>
+              <p className="text-base font-bold text-white truncate">
+                {testIntel.testFrameworks.length > 0 ? testIntel.testFrameworks.join(', ') : 'None Detected'}
+              </p>
+              <p className="text-[10px] text-zinc-500">Jest, Vitest, Pytest, JUnit, etc.</p>
+            </div>
+
+            <div className="p-4 rounded-2xl border border-white/10 bg-surface/60 backdrop-blur-md space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-zinc-400 uppercase tracking-wider">Execution & Coverage</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                    testIntel.coverage.available
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                      : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
+                  }`}
+                >
+                  {testIntel.coverage.available ? 'Report Parsed' : 'Not Available'}
+                </span>
+              </div>
+              <p className="text-base font-bold text-zinc-300">
+                {testIntel.coverage.available ? `${testIntel.coverage.percentage}% Line Coverage` : 'Static Analysis Only'}
+              </p>
+              <p className="text-[10px] text-zinc-500 truncate" title={testIntel.coverage.reason}>
+                {testIntel.coverage.reason}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* SECTION 2: TOPOLOGICAL DISTRIBUTION */}
       <div className="space-y-3">
@@ -190,10 +344,57 @@ export function MetricsCenterView({
         <div className="flex items-center justify-between border-b border-white/5 pb-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-300">
             <BrainCircuit className="w-3.5 h-3.5 text-amber-400" />
-            <span>Code Quality & Risk Telemetry</span>
+            <span>Code Quality & Complexity Telemetry</span>
           </div>
-          <span className="text-[10px] text-zinc-500 font-mono">STATIC CODE COMPLEXITY & RISK CLUSTERS</span>
+          <span className="text-[10px] text-zinc-500 font-mono">
+            {complexitySummary?.status === 'measured' ? 'AST MCCABE CYCLOMATIC MEASUREMENT' : 'ESTIMATED HEURISTICS'}
+          </span>
         </div>
+
+        {/* MCCABE DISTRIBUTION BADGES */}
+        {complexitySummary?.distribution && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="p-3 rounded-xl border border-white/10 bg-surface/50 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-emerald-400 font-semibold uppercase">Low Complexity (&le;5)</span>
+                <p className="text-[9px] text-zinc-500">Clean control flow</p>
+              </div>
+              <span className="text-base font-bold text-emerald-300 font-mono">
+                {complexitySummary.distribution.low}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-xl border border-white/10 bg-surface/50 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-amber-400 font-semibold uppercase">Moderate (6-10)</span>
+                <p className="text-[9px] text-zinc-500">Moderate nesting</p>
+              </div>
+              <span className="text-base font-bold text-amber-300 font-mono">
+                {complexitySummary.distribution.medium}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-xl border border-white/10 bg-surface/50 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-rose-400 font-semibold uppercase">High Complexity (&gt;10)</span>
+                <p className="text-[9px] text-zinc-500">Refactoring targets</p>
+              </div>
+              <span className="text-base font-bold text-rose-300 font-mono">
+                {complexitySummary.distribution.high}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-xl border border-white/10 bg-surface/50 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-cyan-400 font-semibold uppercase">Avg per Function</span>
+                <p className="text-[9px] text-zinc-500">Across {complexitySummary.totalFunctionsCount} functions</p>
+              </div>
+              <span className="text-base font-bold text-cyan-300 font-mono">
+                {complexitySummary.averagePerFunction}
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Complexity by File (Horizontal Bar Chart) */}
@@ -202,10 +403,12 @@ export function MetricsCenterView({
               <div className="flex items-center gap-2">
                 <BrainCircuit className="w-4 h-4 text-amber-400" />
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-white">
-                  Relative File Complexity (LOC + Nesting)
+                  Relative File Complexity (McCabe Cyclomatic)
                 </h4>
               </div>
-              <span className="text-[10px] text-zinc-500 font-mono">AST weighted metrics</span>
+              <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono">
+                {complexitySummary?.status === 'measured' ? 'AST Branch Measurement' : 'AST Weighted Metrics'}
+              </span>
             </div>
 
             <div className="h-60">
@@ -213,7 +416,7 @@ export function MetricsCenterView({
                 <BarChart data={complexityData} layout="vertical" margin={{ left: -10, right: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
                   <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                  <YAxis type="category" dataKey="path" width={140} tick={{ fill: '#cbd5e1', fontSize: 10 }} />
+                  <YAxis type="category" dataKey="path" width={160} tick={{ fill: '#cbd5e1', fontSize: 10 }} />
                   <RechartsTooltip
                     contentStyle={{
                       background: '#0f1420',

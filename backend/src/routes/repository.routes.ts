@@ -6,7 +6,9 @@ import {
   validateSessionId,
   validateFilePath,
 } from '../middleware/validation.middleware';
+import { requireSessionAuth } from '../middleware/auth.middleware';
 import { strictRateLimiter } from '../middleware/rate-limiter.middleware';
+import { ingestionConcurrencyLimiter } from '../middleware/concurrency-limiter.middleware';
 import config from '../config/env.config';
 
 const router = Router();
@@ -29,6 +31,7 @@ const upload = multer({
 // Analyze GitHub repository
 router.post(
   '/analyze-github',
+  ingestionConcurrencyLimiter.middleware,
   strictRateLimiter,
   validateGitHubUrl,
   repositoryController.analyzeGitHub.bind(repositoryController)
@@ -37,6 +40,7 @@ router.post(
 // Upload ZIP file
 router.post(
   '/upload-zip',
+  ingestionConcurrencyLimiter.middleware,
   strictRateLimiter,
   upload.single('file'),
   repositoryController.uploadZip.bind(repositoryController)
@@ -46,6 +50,7 @@ router.post(
 router.get(
   '/:sessionId/file',
   validateSessionId,
+  requireSessionAuth,
   validateFilePath,
   repositoryController.getFile.bind(repositoryController)
 );
@@ -54,6 +59,7 @@ router.get(
 router.get(
   '/:sessionId/tree',
   validateSessionId,
+  requireSessionAuth,
   repositoryController.getFileTree.bind(repositoryController)
 );
 

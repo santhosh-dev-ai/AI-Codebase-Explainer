@@ -31,20 +31,16 @@ export default function RootLayout({
       <body className={`${inter.variable} ${jetbrainsMono.variable}`}>
         {children}
         <TargetCursor
-          targetSelector=".cursor-target, [data-cursor='target'], button, a[href], [role='button'], .react-flow__node, input[type='text'], input[type='search']"
           cursorColor="#22d3ee"
-          cursorColorOnTarget="#c084fc"
           spinDuration={3}
-          hoverDuration={0.2}
-          parallaxOn={true}
           hideDefaultCursor={true}
           size={32}
           cornerSize={10}
           thickness={1.75}
-          padding={5}
-          matchRadius={true}
           dotSize={3}
           blendMode="normal"
+          clickEffect={true}
+          followSpeed={0.45}
         />
       </body>
     </html>

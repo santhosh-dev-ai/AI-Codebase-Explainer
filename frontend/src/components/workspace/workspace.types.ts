@@ -1,5 +1,5 @@
 import type { FileNode, RepoMetadata } from '@/types/codebase.types';
-import type { ChatMessage as AppChatMessage } from '@/types/chat.types';
+import type { ChatMessage as AppChatMessage, FileReference } from '@/types/chat.types';
 
 export interface FileTreeData {
   fileTree: FileNode[];
@@ -24,7 +24,11 @@ export type RightPanelTab = 'overview' | 'architecture' | 'insights' | 'risks' |
 
 export type MobileTab = 'explorer' | 'main' | 'inspector' | 'chat';
 
-export type LocalChatMessage = Pick<AppChatMessage, 'id' | 'role' | 'content' | 'timestamp'>;
+export interface LocalChatMessage extends Pick<AppChatMessage, 'id' | 'role' | 'content' | 'timestamp'> {
+  isStreaming?: boolean;
+  isInterrupted?: boolean;
+  references?: FileReference[];
+}
 
 export interface SelectionExplainState {
   x: number;

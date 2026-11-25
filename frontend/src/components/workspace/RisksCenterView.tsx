@@ -107,7 +107,9 @@ export function RisksCenterView({
       {/* Risks Grid */}
       {filteredRisks.length === 0 ? (
         <div className="p-8 rounded-2xl border border-white/10 bg-surface/40 text-center text-xs text-zinc-400">
-          No risks match the selected severity filter.
+          {risks.length === 0
+            ? 'No confirmed, inferred, or heuristic risks exceeded detection thresholds for the analyzed repository files.'
+            : 'No risks match the selected severity filter.'}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -120,7 +122,41 @@ export function RisksCenterView({
                 ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
                 : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
 
-            const isConfirmed = files.length > 0;
+            const tier =
+              risk.classification ||
+              (risk.status === 'CONFIRMED' || risk.status === 'CONFIRMED AST'
+                ? 'CONFIRMED'
+                : risk.status === 'CONFIRMED_VULNERABILITY'
+                ? 'CONFIRMED_VULNERABILITY'
+                : risk.status === 'CONFIRMED_SINK'
+                ? 'CONFIRMED_SINK'
+                : risk.status === 'HEURISTIC'
+                ? 'HEURISTIC'
+                : 'INFERRED');
+
+            const isUnanchoredAiRisk =
+              (risk.detectionMethod === 'ai-architecture-review' || tier === 'INFERRED') &&
+              files.length === 0 &&
+              (!risk.sourceReferences || risk.sourceReferences.length === 0);
+
+            const tierStyle =
+              tier === 'CONFIRMED_VULNERABILITY'
+                ? 'bg-rose-500/10 text-rose-300 border border-rose-500/30'
+                : tier === 'CONFIRMED_SINK'
+                ? 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/30'
+                : tier === 'CONFIRMED'
+                ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
+                : tier === 'HEURISTIC'
+                ? 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/20'
+                : 'bg-amber-500/10 text-amber-300 border border-amber-500/20';
+
+            const tierLabel = isUnanchoredAiRisk
+              ? 'AI Architectural Insight'
+              : tier === 'CONFIRMED_VULNERABILITY'
+              ? 'CONFIRMED VULNERABILITY'
+              : tier === 'CONFIRMED_SINK'
+              ? 'CONFIRMED SINK'
+              : tier;
 
             return (
               <div
@@ -129,29 +165,23 @@ export function RisksCenterView({
               >
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className={`text-[9px] uppercase font-bold tracking-wider px-2 py-0.5 rounded border ${severityStyle}`}>
                         {risk.severity} Severity
                       </span>
-                      <span
-                        className={`text-[9px] uppercase font-mono px-2 py-0.5 rounded flex items-center gap-1 ${
-                          isConfirmed
-                            ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
-                            : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
-                        }`}
-                      >
-                        {isConfirmed ? (
-                          <>
-                            <ShieldCheck className="w-2.5 h-2.5" />
-                            <span>CONFIRMED AST</span>
-                          </>
+                      <span className={`text-[9px] uppercase font-mono px-2 py-0.5 rounded flex items-center gap-1 ${tierStyle}`}>
+                        {tier === 'CONFIRMED' || tier === 'CONFIRMED_VULNERABILITY' ? (
+                          <ShieldCheck className="w-2.5 h-2.5" />
                         ) : (
-                          <>
-                            <HelpCircle className="w-2.5 h-2.5" />
-                            <span>INFERRED RISK</span>
-                          </>
+                          <HelpCircle className="w-2.5 h-2.5" />
                         )}
+                        <span>{tierLabel}</span>
                       </span>
+                      {risk.provenance === 'bundled-third-party' && (
+                        <span className="text-[9px] font-mono uppercase text-violet-300 bg-violet-950/40 border border-violet-400/30 px-2 py-0.5 rounded">
+                          Bundled Third-Party{risk.bundledPackageName ? `: ${risk.bundledPackageName}` : ''}
+                        </span>
+                      )}
                     </div>
 
                     {risk.category && (
@@ -168,6 +198,12 @@ export function RisksCenterView({
                   <p className="text-xs text-zinc-300 font-sans leading-relaxed">
                     {risk.detail}
                   </p>
+                  {risk.detectionMethod && (
+                    <p className="text-[10px] text-zinc-500 font-mono">
+                      Method: {risk.detectionMethod}
+                      {typeof risk.confidence === 'number' ? ` · Confidence ${risk.confidence}%` : ''}
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-3 pt-2">
@@ -189,36 +225,55 @@ export function RisksCenterView({
                         Affected Source Files:
                       </span>
                       <div className="flex flex-wrap gap-1.5">
-                        {files.slice(0, 4).map((file) => (
-                          <button
-                            key={file}
-                            type="button"
-                            onClick={() => onNavigateToFile?.(file)}
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-cyan-500/15 text-zinc-300 hover:text-cyan-200 border border-white/10 hover:border-cyan-400/30 text-[10px] font-mono transition-all"
-                            title={`Inspect ${file}`}
-                          >
-                            <FileCode className="w-2.5 h-2.5 text-cyan-400" />
-                            <span className="truncate max-w-[140px]">{file}</span>
-                            <ExternalLink className="w-2.5 h-2.5 opacity-60" />
-                          </button>
-                        ))}
+                        {files.slice(0, 4).map((file) => {
+                          const ref = risk.sourceReferences?.find((r) => r.filePath === file);
+                          const label = ref?.lineStart ? `${file}:L${ref.lineStart}` : file;
+                          return (
+                            <button
+                              key={file}
+                              type="button"
+                              onClick={() => onNavigateToFile?.(file)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 hover:bg-cyan-500/15 text-zinc-300 hover:text-cyan-200 border border-white/10 hover:border-cyan-400/30 text-[10px] font-mono transition-all"
+                              title={`Inspect ${label}`}
+                            >
+                              <FileCode className="w-2.5 h-2.5 text-cyan-400" />
+                              <span className="truncate max-w-[160px]">{label}</span>
+                              <ExternalLink className="w-2.5 h-2.5 opacity-60" />
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
 
                   {/* Actions & Explorer Highlighting */}
-                  <div className="flex items-center justify-between pt-2 border-t border-white/5 text-xs">
-                    <span className="text-zinc-400 text-[11px]">
-                      Mapped files: <strong className="text-zinc-200">{files.length}</strong>
-                    </span>
-                    <button
-                      onClick={() => onFocusRisk(risk)}
-                      className="px-3 py-1 rounded-lg border border-cyan-400/30 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 text-xs font-semibold transition-colors flex items-center gap-1.5"
-                    >
-                      <span>Highlight in Explorer</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </button>
-                  </div>
+                  {isUnanchoredAiRisk ? (
+                    <div className="flex items-center justify-between pt-2 border-t border-white/5 text-xs">
+                      <span className="text-zinc-400 text-[11px] italic">
+                        Qualitative observation (no source file mapped)
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono text-zinc-500 bg-white/5 border border-white/5">
+                        Repository Scope
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between pt-2 border-t border-white/5 text-xs">
+                      <span className="text-zinc-400 text-[11px]">
+                        Mapped files: <strong className="text-zinc-200">{files.length}</strong>
+                      </span>
+                      {files.length > 0 ? (
+                        <button
+                          onClick={() => onFocusRisk(risk)}
+                          className="px-3 py-1 rounded-lg border border-cyan-400/30 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200 text-xs font-semibold transition-colors flex items-center gap-1.5"
+                        >
+                          <span>Highlight in Explorer</span>
+                          <ArrowRight className="w-3 h-3" />
+                        </button>
+                      ) : (
+                        <span className="text-[10px] text-zinc-500 italic">No direct file target</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             );

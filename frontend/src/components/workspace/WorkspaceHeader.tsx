@@ -21,6 +21,15 @@ import {
 } from 'lucide-react';
 import type { RepoMetadata } from '@/types/codebase.types';
 import type { WorkspaceMainView, MobileTab } from './workspace.types';
+import { PillNav, type PillNavItem } from '@/components/react-bits';
+
+const workspaceNavItems: PillNavItem[] = [
+  { label: 'Code', href: '#code', icon: <FileCode2 className="w-3.5 h-3.5" /> },
+  { label: 'Architecture', href: '#architecture', icon: <Network className="w-3.5 h-3.5" /> },
+  { label: 'Overview', href: '#overview', icon: <Sparkles className="w-3.5 h-3.5" /> },
+  { label: 'Risks', href: '#risks', icon: <ShieldAlert className="w-3.5 h-3.5" /> },
+  { label: 'Metrics', href: '#metrics', icon: <BarChart3 className="w-3.5 h-3.5" /> },
+];
 
 interface WorkspaceHeaderProps {
   sessionId?: string;
@@ -106,6 +115,15 @@ export function WorkspaceHeader({
               <span className="max-w-[130px] sm:max-w-[180px] truncate">{repoName}</span>
             </span>
 
+            {metadata?.isSampled && (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 border border-amber-500/20 text-amber-300 flex-shrink-0"
+                title={`Large repository sampled: analyzed ${metadata.analyzedFiles || metadata.totalFiles} of ${metadata.rawTotalFiles} files`}
+              >
+                Sampled ({metadata.analyzedFiles || metadata.totalFiles}/{metadata.rawTotalFiles})
+              </span>
+            )}
+
             {/* Breadcrumb path for selected file */}
             {fileParts.length > 0 && activeView === 'code' && (
               <>
@@ -126,37 +144,30 @@ export function WorkspaceHeader({
           </div>
         </div>
 
-        {/* Center Section: Primary Workspace View Switcher (Desktop) */}
-        <div className="hidden lg:flex items-center gap-1 bg-void p-1 rounded-xl border border-white/10">
-          <ViewTabButton
-            active={activeView === 'code'}
-            onClick={() => onSelectView('code')}
-            icon={<FileCode2 className="w-3.5 h-3.5" />}
-            label="Code"
-          />
-          <ViewTabButton
-            active={activeView === 'architecture'}
-            onClick={() => onSelectView('architecture')}
-            icon={<Network className="w-3.5 h-3.5" />}
-            label="Architecture"
-          />
-          <ViewTabButton
-            active={activeView === 'overview'}
-            onClick={() => onSelectView('overview')}
-            icon={<Sparkles className="w-3.5 h-3.5" />}
-            label="Overview"
-          />
-          <ViewTabButton
-            active={activeView === 'risks'}
-            onClick={() => onSelectView('risks')}
-            icon={<ShieldAlert className="w-3.5 h-3.5" />}
-            label="Risks"
-          />
-          <ViewTabButton
-            active={activeView === 'metrics'}
-            onClick={() => onSelectView('metrics')}
-            icon={<BarChart3 className="w-3.5 h-3.5" />}
-            label="Metrics"
+        {/* Center Section: Primary Workspace View Switcher (Desktop PillNav) */}
+        <div className="hidden lg:flex items-center justify-center">
+          <PillNav
+            items={workspaceNavItems}
+            activeHref={`#${activeView}`}
+            theme="dark"
+            layout="joined"
+            size="sm"
+            surface="glass"
+            itemStyle="pill"
+            hoverEffect="fill"
+            indicator="dot"
+            highlightColor="#22d3ee"
+            highlightTextColor="#09090b"
+            collapse="never"
+            onItemClick={(item, _idx, event) => {
+              event.preventDefault();
+              const view = item.href?.replace('#', '') as WorkspaceMainView;
+              if (view && view !== activeView) {
+                onSelectView(view);
+              }
+            }}
+            className="workspace-pill-nav"
+            ariaLabel="Workspace Views"
           />
         </div>
 
@@ -297,33 +308,6 @@ export function WorkspaceHeader({
         ))}
       </div>
     </header>
-  );
-}
-
-function ViewTabButton({
-  label,
-  icon,
-  active,
-  onClick,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`cursor-target flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono transition-all ${
-        active
-          ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/30 font-medium shadow-[0_0_10px_rgba(34,211,238,0.15)]'
-          : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5 border border-transparent'
-      }`}
-      data-cursor-label={label}
-    >
-      {icon}
-      <span>{label}</span>
-    </button>
   );
 }
 

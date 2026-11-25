@@ -43,6 +43,8 @@ import type {
   DependencyNodeType,
 } from '@/types/analysis.types';
 import { LatticeLoader } from '@/components/react-bits/LatticeLoader';
+import { API_BASE_URL } from '@/constants/config';
+import { getSessionToken } from '@/lib/api-client';
 
 interface DependencyGraphViewProps {
   sessionId: string;
@@ -281,7 +283,16 @@ function DependencyGraphContent({
     try {
       setIsLoading(true);
       setError('');
-      const response = await fetch(`http://localhost:3001/api/analysis/${sessionId}/dependencies`);
+      const token = getSessionToken(sessionId);
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['X-Session-Token'] = token;
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const response = await fetch(`${API_BASE_URL}/api/analysis/${sessionId}/dependencies`, {
+        headers,
+        credentials: 'include',
+      });
       if (!response.ok) {
         throw new Error(`Failed to load dependency graph (${response.status})`);
       }

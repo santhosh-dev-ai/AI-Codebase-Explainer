@@ -1,6 +1,8 @@
 import express, { Application } from 'express';
+import helmet from 'helmet';
 import cors from 'cors';
 import { corsOptions } from './config/cors.config';
+import { config } from './config/env.config';
 import { rateLimiter } from './middleware/rate-limiter.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error-handler.middleware';
 import healthRoutes from './routes/health.routes';
@@ -11,6 +13,19 @@ import logger from './utils/logger.util';
 
 export function createApp(): Application {
   const app = express();
+
+  // Security Headers via Helmet
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      hidePoweredBy: true,
+      hsts: config.nodeEnv === 'production',
+      frameguard: { action: 'deny' },
+      noSniff: true,
+    })
+  );
 
   // Middleware
   app.use(cors(corsOptions));

@@ -15,6 +15,7 @@ export const API_ENDPOINTS = {
   FLOW_DIAGRAM: (sessionId: string) => `/api/analysis/${sessionId}/flow-diagram`,
   GET_DEPENDENCIES: (sessionId: string) => `/api/analysis/${sessionId}/dependencies`,
   CHAT_MESSAGE: (sessionId: string) => `/api/chat/${sessionId}/message`,
+  CHAT_MESSAGE_STREAM: (sessionId: string) => `/api/chat/${sessionId}/message/stream`,
   CHAT_HISTORY: (sessionId: string) => `/api/chat/${sessionId}/history`,
 } as const;
 

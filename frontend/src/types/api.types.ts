@@ -14,6 +14,7 @@ export interface AnalyzeGitHubRequest {
 
 export interface AnalyzeGitHubResponse {
   sessionId: string;
+  sessionToken?: string;
   fileTree: import('./codebase.types').FileNode[];
   metadata: import('./codebase.types').RepoMetadata;
 }

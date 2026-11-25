@@ -8,6 +8,15 @@ export interface FileNode {
   language?: string;
 }
 
+export interface CodeMetricsSummary {
+  totalLines: number;
+  codeLines: number;
+  blankLines: number;
+  commentLines: number;
+  mixedLines: number;
+  provenance: 'measured' | 'estimated' | 'unavailable';
+}
+
 export interface RepoMetadata {
   name: string;
   totalFiles: number;
@@ -15,6 +24,10 @@ export interface RepoMetadata {
   languages: Record<string, number>;
   fileTypes: Record<string, number>;
   depth: number;
+  metrics?: CodeMetricsSummary;
+  rawTotalFiles?: number;
+  analyzedFiles?: number;
+  isSampled?: boolean;
 }
 
 export interface FileContent {
@@ -34,4 +47,17 @@ export interface SessionData {
   expiresAt: Date;
   source: 'github' | 'zip';
   sourceUrl?: string;
+  branch?: string;
+  commitSha?: string;
+  contentHash?: string;
+  rawManifestHash?: string;
+  cachedOverview?: any;
+  cachedOverviewFingerprint?: string;
+  cachedOverviewEngineVersion?: string;
+  tokenHash?: string;
+}
+
+export interface SessionCreationResult {
+  sessionId: string;
+  sessionToken: string;
 }

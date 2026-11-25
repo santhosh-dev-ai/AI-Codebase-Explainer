@@ -1,27 +1,50 @@
 import axios from 'axios';
-import JSZip from 'jszip';
+import dns from 'dns';
 import config from '../../config/env.config';
 import logger from '../../utils/logger.util';
 import { parseGitHubUrl } from './validation.service';
-import { shouldExcludeFile, shouldExcludeDirectory } from '../../utils/file-processor.util';
+import { zipParserService } from './zip-parser.service';
+
+// Ensure IPv4-first DNS resolution regardless of entrypoint (server.ts, Vercel, or unit tests)
+try {
+  dns.setDefaultResultOrder?.('ipv4first');
+} catch {
+  // Ignore on older Node runtimes
+}
 
 export class GitHubService {
   private apiBaseUrl = 'https://api.github.com';
   private codeloadBaseUrl = 'https://codeload.github.com';
-  private headers: Record<string, string>;
 
-  constructor() {
-    this.headers = {
-      Accept: 'application/vnd.github.v3+json',
-      'User-Agent': 'Codebase-Explainer',
+  private getHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json, application/vnd.github.v3+json',
+      'User-Agent': 'AI-Codebase-Explainer/2.0',
+      'X-GitHub-Api-Version': '2022-11-28',
     };
 
     if (config.githubToken) {
-      this.headers.Authorization = `token ${config.githubToken}`;
+      // Modern GitHub API prefers Bearer tokens
+      headers.Authorization =
+        config.githubToken.startsWith('Bearer ') || config.githubToken.startsWith('token ')
+          ? config.githubToken
+          : `Bearer ${config.githubToken}`;
     }
+
+    return headers;
   }
 
-  async fetchRepository(githubUrl: string): Promise<Map<string, string>> {
+  private sanitizeLogMessage(message: string): string {
+    return message
+      .replace(/(?:Bearer|token)\s+[A-Za-z0-9_.-]+/gi, '[REDACTED_AUTH]')
+      .replace(/(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+/g, '[REDACTED_GITHUB_TOKEN]');
+  }
+
+  async fetchRepository(
+    githubUrl: string,
+    abortSignal?: AbortSignal,
+    preferredBranch?: string
+  ): Promise<Map<string, string>> {
     const parsed = parseGitHubUrl(githubUrl);
     if (!parsed) {
       throw new Error('Invalid GitHub URL');
@@ -37,172 +60,366 @@ export class GitHubService {
     try {
       let response;
       if (config.githubToken) {
-        response = await this.downloadZipViaApi(owner, repo);
+        response = await this.withRetry(
+          () => this.downloadZipViaApi(owner, repo, abortSignal),
+          2,
+          800,
+          abortSignal
+        );
       } else {
         try {
-          response = await this.downloadZipViaCodeload(owner, repo);
-        } catch (codeloadError) {
-          logger.warn('Codeload branch guessing failed, falling back to GitHub API zipball', {
+          response = await this.withRetry(
+            () => this.downloadZipViaCodeload(owner, repo, abortSignal, preferredBranch),
+            1,
+            800,
+            abortSignal
+          );
+        } catch (codeloadError: any) {
+          if (abortSignal?.aborted || this.isAbortError(codeloadError)) {
+            throw codeloadError;
+          }
+
+          // Fallback to api.github.com zipball (also handles repositories with custom default branch
+          // or host-specific codeload routing/DNS blocks)
+          logger.warn('Codeload archive fetch failed, falling back to GitHub API zipball', {
             owner,
             repo,
-            error: codeloadError instanceof Error ? codeloadError.message : 'Unknown error',
+            code: codeloadError?.code,
+            error: this.sanitizeLogMessage(
+              codeloadError instanceof Error ? codeloadError.message : 'Unknown error'
+            ),
           });
-          response = await this.downloadZipViaApi(owner, repo);
+          response = await this.withRetry(
+            () => this.downloadZipViaApi(owner, repo, abortSignal),
+            2,
+            800,
+            abortSignal
+          );
         }
       }
 
       logger.info('ZIP archive downloaded, extracting files', { owner, repo });
 
       // Parse the ZIP and extract files
-      const files = await this.extractFilesFromZip(Buffer.from(response.data));
+      const files = await this.extractFilesFromZip(Buffer.from(response.data), abortSignal);
 
       logger.info('Repository fetched successfully', {
         owner,
         repo,
-        fileCount: files.size
+        fileCount: files.size,
       });
 
       return files;
-    } catch (error) {
+    } catch (error: any) {
       logger.error('Error fetching repository from GitHub', {
         owner,
         repo,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        code: error?.code,
+        status: error?.response?.status,
+        error: this.sanitizeLogMessage(error instanceof Error ? error.message : 'Unknown error'),
       });
 
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 403) {
-          throw new Error('GitHub rate limit exceeded. Add GITHUB_TOKEN in backend/.env or try again later.');
-        }
-        if (error.response?.status === 404) {
-          throw new Error('Repository not found or is private. Please check the URL.');
-        }
-        if (error.response?.status === 406) {
-          throw new Error('Repository is too large to download.');
-        }
-      }
-
-      throw new Error(`Failed to fetch repository: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw this.formatGitHubError(error, owner, repo);
     }
   }
 
-  private async downloadZipViaApi(owner: string, repo: string) {
-    const zipUrl = `${this.apiBaseUrl}/repos/${owner}/${repo}/zipball`;
+  private async downloadZipViaApi(owner: string, repo: string, abortSignal?: AbortSignal) {
+    const zipUrl = `${this.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zipball`;
     return axios.get(zipUrl, {
-      headers: this.headers,
+      headers: this.getHeaders(),
       responseType: 'arraybuffer',
       maxContentLength: config.maxFileSize,
-      timeout: 120000,
+      timeout: 60000,
+      maxRedirects: 5,
+      signal: abortSignal,
     });
   }
 
-  private async downloadZipViaCodeload(owner: string, repo: string) {
-    const candidateBranches = ['main', 'master', 'develop', 'dev'];
+  private async downloadZipViaCodeload(
+    owner: string,
+    repo: string,
+    abortSignal?: AbortSignal,
+    preferredBranch?: string
+  ) {
+    const defaultCandidates = ['main', 'master', 'develop', 'trunk', 'dev'];
+    const safePreferred =
+      preferredBranch && /^[\w./-]+$/.test(preferredBranch) && !preferredBranch.includes('..')
+        ? preferredBranch
+        : undefined;
+    const candidateBranches = safePreferred
+      ? Array.from(new Set([safePreferred, ...defaultCandidates]))
+      : defaultCandidates;
+
     let lastError: unknown = null;
 
     for (const branch of candidateBranches) {
+      if (abortSignal?.aborted) {
+        const cancelErr: any = new Error('Request aborted');
+        cancelErr.name = 'AbortError';
+        throw cancelErr;
+      }
+
       try {
-        const zipUrl = `${this.codeloadBaseUrl}/${owner}/${repo}/zip/refs/heads/${branch}`;
+        const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
+        const zipUrl = `${this.codeloadBaseUrl}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/zip/refs/heads/${encodedBranch}`;
 
         logger.debug('Trying codeload branch archive', { owner, repo, branch });
 
         return await axios.get(zipUrl, {
           headers: {
-            'User-Agent': 'Codebase-Explainer',
+            'User-Agent': 'AI-Codebase-Explainer/2.0',
+            Accept: 'application/zip, application/octet-stream, */*',
           },
           responseType: 'arraybuffer',
           maxContentLength: config.maxFileSize,
-          timeout: 120000,
+          timeout: 45000,
+          maxRedirects: 5,
+          signal: abortSignal,
           validateStatus: (status) => status >= 200 && status < 400,
         });
-      } catch (error) {
+      } catch (error: any) {
         lastError = error;
+        // Break immediately on cancellation, DNS failure, TLS failure, or unreachable network
+        // so retrying additional branch names does not multiply failing network roundtrips
+        if (
+          abortSignal?.aborted ||
+          this.isAbortError(error) ||
+          this.isDnsError(error) ||
+          this.isTlsError(error) ||
+          this.isConnectionError(error)
+        ) {
+          break;
+        }
       }
     }
 
     throw lastError || new Error('Unable to download repository archive from codeload');
   }
 
-  private async extractFilesFromZip(buffer: Buffer): Promise<Map<string, string>> {
-    const zip = await JSZip.loadAsync(buffer);
-    const files = new Map<string, string>();
-
-    // GitHub ZIP archives have a top-level directory like "owner-repo-sha/"
-    // We need to strip this prefix
-    let prefix = '';
-    for (const zipPath of Object.keys(zip.files)) {
-      const parts = zipPath.split('/');
-      if (parts.length >= 1) {
-        prefix = parts[0] + '/';
-        break;
-      }
-    }
-
-    let totalExtractedBytes = 0;
-    const MAX_TOTAL_EXTRACTED = 150 * 1024 * 1024; // 150MB cumulative safety limit
-
-    for (const [zipPath, zipEntry] of Object.entries(zip.files)) {
-      if (zipEntry.dir) continue;
-
-      // Guard against path traversal attempts in archive entries
-      if (zipPath.includes('..') || zipPath.startsWith('/')) continue;
-
-      // Strip the top-level directory prefix
-      let relativePath = zipPath;
-      if (prefix && zipPath.startsWith(prefix)) {
-        relativePath = zipPath.substring(prefix.length);
-      }
-
-      if (!relativePath) continue;
-
-      // Check directory exclusions
-      const pathParts = relativePath.split('/');
-      const shouldSkipDir = pathParts.slice(0, -1).some(part => shouldExcludeDirectory(part));
-      if (shouldSkipDir) continue;
-
-      // Check file exclusions
-      const fileName = pathParts[pathParts.length - 1];
-      if (shouldExcludeFile(fileName)) continue;
-
-      try {
-        // Try to read as text; skip binary files
-        const content = await zipEntry.async('string');
-
-        // Skip very large files (>500KB) and likely binary files
-        if (content.length > 500000) continue;
-        if (this.isBinaryContent(content)) continue;
-
-        totalExtractedBytes += Buffer.byteLength(content, 'utf8');
-        if (totalExtractedBytes > MAX_TOTAL_EXTRACTED) {
-          throw new Error('Repository archive exceeds uncompressed safety limit of 150MB');
-        }
-
-        files.set(relativePath, content);
-      } catch (err) {
-        if (err instanceof Error && err.message.includes('safety limit')) {
-          throw err;
-        }
-        // Skip files that can't be read as text (binary files)
-        logger.debug('Skipping binary file', { path: relativePath });
-      }
-    }
-
-    return files;
+  private isAbortError(error: any): boolean {
+    if (!error) return false;
+    return (
+      axios.isCancel(error) ||
+      error.name === 'AbortError' ||
+      error.name === 'CanceledError' ||
+      error.code === 'ERR_CANCELED'
+    );
   }
 
-  private isBinaryContent(content: string): boolean {
-    // Check for null bytes which indicate binary content
-    const sampleSize = Math.min(content.length, 8000);
-    const sample = content.substring(0, sampleSize);
+  private isTransientDnsError(error: any): boolean {
+    if (!error) return false;
+    const code = error.code || error.cause?.code;
+    const msg = error.message || '';
+    return code === 'EAI_AGAIN' || msg.includes('getaddrinfo EAI_AGAIN');
+  }
 
-    let nullCount = 0;
-    for (let i = 0; i < sample.length; i++) {
-      if (sample.charCodeAt(i) === 0) {
-        nullCount++;
-        if (nullCount > 1) return true;
+  private isPermanentDnsError(error: any): boolean {
+    if (!error) return false;
+    const code = error.code || error.cause?.code;
+    const msg = error.message || '';
+    return (
+      code === 'ENOTFOUND' ||
+      code === 'EAI_NONAME' ||
+      msg.includes('getaddrinfo ENOTFOUND') ||
+      msg.includes('getaddrinfo EAI_NONAME')
+    );
+  }
+
+  private isDnsError(error: any): boolean {
+    return this.isTransientDnsError(error) || this.isPermanentDnsError(error);
+  }
+
+  private isTlsError(error: any): boolean {
+    if (!error) return false;
+    const code = error.code || error.cause?.code || '';
+    const msg = (error.message || '').toLowerCase();
+    return (
+      code === 'CERT_HAS_EXPIRED' ||
+      code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+      code === 'ERR_TLS_CERT_ALTNAME_INVALID' ||
+      code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+      code === 'DEPTH_ZERO_SELF_SIGNED_CERT' ||
+      code === 'ERR_TLS_HANDSHAKE_TIMEOUT' ||
+      code === 'EPROTO' ||
+      msg.includes('certificate') ||
+      msg.includes('ssl') ||
+      msg.includes('tls')
+    );
+  }
+
+  private isConnectionError(error: any): boolean {
+    if (!error) return false;
+    const code = error.code || error.cause?.code || '';
+    return (
+      code === 'ECONNREFUSED' ||
+      code === 'ENETUNREACH' ||
+      code === 'EHOSTUNREACH' ||
+      code === 'ECONNRESET' ||
+      code === 'EPIPE' ||
+      code === 'ERR_SOCKET_CLOSED'
+    );
+  }
+
+  private async withRetry<T>(
+    fn: () => Promise<T>,
+    maxRetries = 2,
+    delayMs = 800,
+    abortSignal?: AbortSignal
+  ): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      if (abortSignal?.aborted) {
+        const cancelErr: any = new Error('Request aborted');
+        cancelErr.name = 'AbortError';
+        throw cancelErr;
+      }
+
+      try {
+        return await fn();
+      } catch (err: any) {
+        if (abortSignal?.aborted || this.isAbortError(err)) {
+          throw err;
+        }
+
+        attempt++;
+        const isTransient =
+          this.isTransientDnsError(err) ||
+          err.code === 'ECONNRESET' ||
+          err.code === 'ETIMEDOUT' ||
+          err.code === 'ECONNABORTED' ||
+          err.code === 'EPIPE' ||
+          (axios.isAxiosError(err) && err.response && err.response.status >= 500);
+
+        if (attempt <= maxRetries && isTransient) {
+          const waitMs = Math.min(delayMs * attempt, 3000);
+          logger.warn(`Transient GitHub request failure on attempt ${attempt}, retrying in ${waitMs}ms...`, {
+            code: err.code,
+            error: this.sanitizeLogMessage(err.message || 'Unknown error'),
+          });
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+          continue;
+        }
+        throw err;
       }
     }
-    return false;
+  }
+
+  private formatGitHubError(error: unknown, owner: string, repo: string): Error {
+    if (this.isAbortError(error)) {
+      return new Error(`GitHub download for "${owner}/${repo}" was cancelled.`);
+    }
+
+    if (axios.isAxiosError(error)) {
+      const status = error.response?.status;
+      const code = error.code || (error as any).cause?.code;
+      const msg = error.message || '';
+
+      // 1. DNS Resolution Errors
+      if (this.isTransientDnsError(error)) {
+        return new Error(
+          'Temporary DNS lookup failure while reaching GitHub servers (EAI_AGAIN). Please try again in a moment.'
+        );
+      }
+
+      if (this.isPermanentDnsError(error)) {
+        return new Error(
+          'Unable to reach GitHub servers (DNS lookup failed). Please check your internet connection or network proxy.'
+        );
+      }
+
+      // 2. TLS / Certificate Errors
+      if (this.isTlsError(error)) {
+        return new Error(
+          `Secure TLS connection to GitHub failed while fetching "${owner}/${repo}". Please verify network certificates or proxy settings.`
+        );
+      }
+
+      // 3. Network Timeouts
+      if (code === 'ECONNABORTED' || msg.includes('timeout') || code === 'ETIMEDOUT') {
+        return new Error(
+          `Connection to GitHub timed out while fetching repository "${owner}/${repo}". Please check your connection and try again.`
+        );
+      }
+
+      // 4. Network Connection Resets / Unreachable / Refused
+      if (code === 'ECONNRESET' || code === 'EPIPE') {
+        return new Error(
+          `Connection to GitHub was interrupted while downloading "${owner}/${repo}". Please try again.`
+        );
+      }
+
+      if (code === 'ECONNREFUSED' || code === 'ENETUNREACH' || code === 'EHOSTUNREACH') {
+        return new Error(
+          `Unable to connect to GitHub servers (${code}). Please check your internet connection, firewall, or proxy.`
+        );
+      }
+
+      // 5. Rate Limiting & Forbidden
+      if (status === 403) {
+        const remaining = error.response?.headers?.['x-ratelimit-remaining'];
+        const resetTime = error.response?.headers?.['x-ratelimit-reset'];
+        if (remaining === '0') {
+          const resetDate = resetTime ? new Date(parseInt(resetTime, 10) * 1000).toLocaleTimeString() : 'soon';
+          return new Error(
+            `GitHub API rate limit exceeded (resets at ${resetDate}). Add a personal GITHUB_TOKEN in backend/.env to increase rate limits.`
+          );
+        }
+        return new Error(
+          `Access to GitHub repository "${owner}/${repo}" is forbidden. The repository may be private or restricted.`
+        );
+      }
+
+      // 6. Authentication Failure
+      if (status === 401) {
+        return new Error(
+          'GitHub authentication failed. Please verify that your GITHUB_TOKEN in backend/.env is valid.'
+        );
+      }
+
+      // 7. Not Found
+      if (status === 404) {
+        return new Error(
+          `Repository "${owner}/${repo}" was not found on GitHub. Please check that the repository URL is correct and public.`
+        );
+      }
+
+      // 8. Payload / Size Limit
+      if (status === 406 || code === 'ERR_FR_MAX_BODY_LENGTH_EXCEEDED') {
+        return new Error(
+          `Repository "${owner}/${repo}" is too large to download directly as an archive. Please use the ZIP upload option.`
+        );
+      }
+    }
+
+    if (error instanceof Error) {
+      if (this.isTransientDnsError(error)) {
+        return new Error(
+          'Temporary DNS lookup failure while reaching GitHub servers (EAI_AGAIN). Please try again in a moment.'
+        );
+      }
+      if (this.isPermanentDnsError(error)) {
+        return new Error(
+          'Unable to reach GitHub servers (DNS lookup failed). Please check your internet connection or network proxy.'
+        );
+      }
+      if (this.isTlsError(error)) {
+        return new Error(
+          `Secure TLS connection to GitHub failed while fetching "${owner}/${repo}". Please verify network certificates or proxy settings.`
+        );
+      }
+      if (this.isConnectionError(error)) {
+        return new Error(
+          `Unable to connect to GitHub servers while downloading "${owner}/${repo}". Please check your network or proxy.`
+        );
+      }
+      return new Error(this.sanitizeLogMessage(error.message));
+    }
+
+    return new Error('Failed to fetch repository: Unknown error');
+  }
+
+  private async extractFilesFromZip(buffer: Buffer, abortSignal?: AbortSignal): Promise<Map<string, string>> {
+    return zipParserService.parseZipFile(buffer, abortSignal);
   }
 
   async checkRepositoryExists(githubUrl: string): Promise<boolean> {
@@ -212,10 +429,10 @@ export class GitHubService {
     }
 
     const { owner, repo } = parsed;
-    const url = `${this.apiBaseUrl}/repos/${owner}/${repo}`;
+    const url = `${this.apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 
     try {
-      await axios.get(url, { headers: this.headers });
+      await axios.get(url, { headers: this.getHeaders(), timeout: 15000 });
       return true;
     } catch {
       return false;

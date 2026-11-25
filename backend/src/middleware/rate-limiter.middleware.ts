@@ -41,3 +41,32 @@ export const strictRateLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// AI-specific rate limiter (chat, stream, and file explanation)
+export const aiRateLimiter = rateLimit({
+  windowMs: config.rateLimitWindowMs,
+  max: 30, // 30 AI requests per window per session/IP (protects Groq TPM quota)
+  keyGenerator: (req) => {
+    const sessionId = req.params?.sessionId;
+    const token = req.headers['x-session-token']?.toString();
+    return sessionId || token || req.ip || 'global';
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('AI rate limit exceeded', {
+      sessionId: req.params?.sessionId,
+      ip: req.ip,
+      path: req.path,
+    });
+
+    res.setHeader('Retry-After', '30');
+    res.status(429).json({
+      success: false,
+      error: {
+        message: 'AI request limit reached. Please wait briefly before sending more queries.',
+        retryAfter: 30,
+      },
+    });
+  },
+});

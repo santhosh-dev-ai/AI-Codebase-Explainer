@@ -173,10 +173,31 @@ function ArchitectureViewContent({
         title: step.title,
         description: step.description,
         files: step.files,
+        symbols: step.symbols || [],
+        evidence: step.evidence,
         confirmed: step.statusLabel === 'CONFIRMED',
         statusLabel: step.statusLabel,
         type: step.stage,
       }));
+    }
+
+    const entryFiles = overview?.detectedEntryPoints && overview.detectedEntryPoints.length > 0
+      ? overview.detectedEntryPoints
+      : [];
+
+    if (entryFiles.length === 0 && keyModules.length === 0) {
+      return [
+        {
+          step: 1,
+          title: 'Insufficient Repository Evidence',
+          description: 'Execution flow has not been established for the current repository scope.',
+          files: [],
+          symbols: [],
+          confirmed: false,
+          statusLabel: 'UNKNOWN' as const,
+          type: 'entry',
+        },
+      ];
     }
 
     const steps: {
@@ -184,148 +205,75 @@ function ArchitectureViewContent({
       title: string;
       description: string;
       files: string[];
+      symbols?: string[];
+      evidence?: string;
       confirmed: boolean;
-      statusLabel: 'CONFIRMED' | 'INFERRED';
+      statusLabel: 'CONFIRMED' | 'INFERRED' | 'HEURISTIC' | 'UNKNOWN';
       type: string;
-    }[] = [];
-
-    // 1. Entry point stage
-    const entryFiles = overview?.detectedEntryPoints && overview.detectedEntryPoints.length > 0
-      ? overview.detectedEntryPoints
-      : keyModules
-        .filter((m) => m.path.includes('server') || m.path.includes('app') || m.path.includes('index') || m.path.includes('main'))
-        .map((m) => m.path);
-
-    steps.push({
-      step: 1,
-      title: 'Incoming Ingestion & Server Bootstrap',
-      description:
-        entryFiles.length > 0
-          ? `Listens for incoming network connections, initializes runtime configuration, and registers core middleware.`
-          : `Application bootstrap and execution environment setup.`,
-      files: entryFiles.length > 0 ? entryFiles : ['src/index.ts'],
-      confirmed: entryFiles.length > 0,
-      statusLabel: entryFiles.length > 0 ? 'CONFIRMED' : 'INFERRED',
-      type: 'entry',
-    });
-
-    // 2. Routing & Middleware stage
-    const routeModules = keyModules.filter(
-      (m) => m.path.includes('route') || m.path.includes('controller') || m.path.includes('api') || m.name.toLowerCase().includes('route')
-    );
-    steps.push({
-      step: 2,
-      title: 'Request Routing & Security Guards',
-      description:
-        routeModules.length > 0
-          ? `Dispatches request URI to matched route patterns, executing path validation, parameter parsing, and authorization checks.`
-          : `Routes incoming execution contexts to matching business handlers and middleware handlers.`,
-      files: routeModules.map((m) => m.path),
-      confirmed: routeModules.length > 0,
-      statusLabel: routeModules.length > 0 ? 'CONFIRMED' : 'INFERRED',
-      type: 'route',
-    });
-
-    // 3. Domain Logic & Core Services
-    const serviceModules = keyModules.filter(
-      (m) =>
-        m.path.includes('service') ||
-        m.path.includes('engine') ||
-        m.path.includes('lib') ||
-        m.path.includes('core') ||
-        (!m.path.includes('route') && !m.path.includes('server') && !m.path.includes('model'))
-    );
-    steps.push({
-      step: 3,
-      title: 'Business Logic & Core Processing',
-      description:
-        serviceModules.length > 0
-          ? `Executes primary computational workflows, orchestrates internal services, and applies business rules.`
-          : `Primary service logic execution and state transformation.`,
-      files: serviceModules.map((m) => m.path),
-      confirmed: serviceModules.length > 0,
-      statusLabel: serviceModules.length > 0 ? 'CONFIRMED' : 'INFERRED',
-      type: 'service',
-    });
-
-    // 4. Persistence / State / Models
-    const modelModules = keyModules.filter(
-      (m) =>
-        m.path.includes('model') ||
-        m.path.includes('db') ||
-        m.path.includes('store') ||
-        m.path.includes('schema') ||
-        m.path.includes('repository')
-    );
-    if (modelModules.length > 0 || overview?.deepDive?.dataLifecycle) {
-      steps.push({
-        step: 4,
-        title: 'State Mutation & Data Persistence',
+    }[] = [
+      {
+        step: 1,
+        title: entryFiles.length > 0 ? 'Identified Entry Modules' : 'Primary Modules (Entry Unconfirmed)',
         description:
-          modelModules.length > 0
-            ? `Interacts with persistent entities, reads cached datasets, and ensures transactional consistency.`
-            : `Reads or mutates persistent application state.`,
-        files: modelModules.map((m) => m.path),
-        confirmed: modelModules.length > 0,
-        statusLabel: modelModules.length > 0 ? 'CONFIRMED' : 'INFERRED',
-        type: 'storage',
+          entryFiles.length > 0
+            ? `Entry candidates identified at ${entryFiles.join(', ')}.`
+            : 'No explicit entry point file identified; listing highest-scoring modules.',
+        files: entryFiles.length > 0 ? entryFiles : keyModules.slice(0, 2).map((m) => m.path),
+        confirmed: entryFiles.length > 0,
+        statusLabel: entryFiles.length > 0 ? 'CONFIRMED' : 'INFERRED',
+        type: 'entry',
+      },
+    ];
+
+    if (keyModules.length > 0) {
+      steps.push({
+        step: 2,
+        title: 'Core Processing Modules',
+        description: 'Modules grouped from static file roles; runtime invocation order is inferred.',
+        files: keyModules.slice(0, 4).map((m) => m.path),
+        confirmed: false,
+        statusLabel: 'INFERRED',
+        type: 'service',
       });
     }
-
-    // 5. Response Serialization & Egress
-    steps.push({
-      step: steps.length + 1,
-      title: 'Response Formatting & Client Egress',
-      description: `Formats transformed domain output into client-ready payloads (JSON, HTML, or stream) and sets response headers.`,
-      files: entryFiles.slice(0, 1),
-      confirmed: false,
-      statusLabel: 'INFERRED',
-      type: 'egress',
-    });
 
     return steps;
   }, [overview, keyModules]);
 
-  // Derive Data Flow Stages
+  // Derive Data Flow Stages strictly from backend evidence when available
   const dataFlowStages = useMemo(() => {
+    if (overview?.dataFlowStages && overview.dataFlowStages.length > 0) {
+      return overview.dataFlowStages.map((s) => ({
+        stage: s.stage,
+        label: s.label,
+        description: s.description,
+        tech: s.tech || overview.primaryEcosystem || 'Source Module',
+        badge: s.classification,
+        files: s.files || [],
+      }));
+    }
+
     return [
       {
-        stage: '01. Ingestion',
-        label: 'Source Ingestion',
-        description: 'External client requests, webhook triggers, or CLI arguments.',
-        tech: overview?.projectType || 'HTTP / REST',
-        badge: 'INPUT',
+        stage: '01. Input',
+        label: 'Entry / Source Interface',
+        description: overview?.detectedEntryPoints?.length
+          ? `Observed entry paths: ${overview.detectedEntryPoints.slice(0, 3).join(', ')}.`
+          : 'Entry input source could not be confirmed from inspected metadata.',
+        tech: overview?.framework || overview?.primaryEcosystem || 'Unconfirmed',
+        badge: overview?.detectedEntryPoints?.length ? 'INFERRED' : 'UNKNOWN',
+        files: overview?.detectedEntryPoints?.slice(0, 2) || [],
       },
       {
-        stage: '02. Validation',
-        label: 'Schema Validation',
-        description: 'Input parameter sanitization, route token verification, and payload extraction.',
-        tech: overview?.framework || 'Middleware',
-        badge: 'SECURITY',
-      },
-      {
-        stage: '03. Processing',
-        label: 'Core Transformation',
-        description: overview?.dataFlow || 'State computation, domain entity resolution, and algorithmic transformations.',
-        tech: overview?.pattern || 'Service Layer',
-        badge: 'COMPUTE',
-      },
-      {
-        stage: '04. Storage',
-        label: 'State & Persistence',
-        description: overview?.deepDive?.dataLifecycle || 'Session cache, local database storage, or external API persistence.',
-        tech: 'Persistence',
-        badge: 'STATE',
-      },
-      {
-        stage: '05. Egress',
-        label: 'Payload Delivery',
-        description: 'Serialized HTTP response, event emitter broadcast, or standard output streaming.',
-        tech: 'Output Buffer',
-        badge: 'OUTPUT',
+        stage: '02. Core',
+        label: 'Module Processing',
+        description: overview?.dataFlow || 'Detailed runtime data transformations not yet established.',
+        tech: overview?.pattern || 'Modular',
+        badge: overview?.dataFlow ? 'INFERRED' : 'UNKNOWN',
+        files: keyModules.slice(0, 3).map((m) => m.path),
       },
     ];
-  }, [overview]);
+  }, [overview, keyModules]);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-void/50 overflow-hidden font-mono select-none">
@@ -638,10 +586,13 @@ function ArchitectureViewContent({
                               {step.title}
                             </span>
                             <span
-                              className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded ${step.statusLabel === 'CONFIRMED'
-                                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                                }`}
+                              className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded ${
+                                step.statusLabel === 'CONFIRMED'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : step.statusLabel === 'UNKNOWN'
+                                  ? 'bg-zinc-500/15 text-zinc-300 border border-zinc-500/30'
+                                  : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                              }`}
                             >
                               {step.statusLabel}
                             </span>
@@ -723,8 +674,12 @@ function ArchitectureViewContent({
                               <span className="text-sm font-semibold text-zinc-100 group-hover:text-cyan-200 transition-colors">
                                 {module.name}
                               </span>
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                                VERIFIED AST
+                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                                module.evidence
+                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                                  : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                              }`}>
+                                {module.evidence ? 'SOURCE MAPPED' : 'INFERRED'}
                               </span>
                             </div>
 
@@ -767,20 +722,25 @@ function ArchitectureViewContent({
             {/* ========================================================= */}
             {activeTab === 'dataflow' && (
               <div className="w-full h-full overflow-y-auto p-4 sm:p-6 max-w-5xl mx-auto space-y-6">
-                <div className="p-4 rounded-xl border border-white/10 bg-surface/40 backdrop-blur-md">
-                  <h4 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <Database className="w-4 h-4 text-amber-400" />
-                    <span>System Data Flow & State Lifecycle</span>
-                  </h4>
-                  <p className="text-xs text-zinc-400 mt-1 font-sans leading-relaxed">
+                <div className="p-4 rounded-xl border border-white/10 bg-surface/40 backdrop-blur-md space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                      <Database className="w-4 h-4 text-amber-400" />
+                      <span>Architectural Data Flow & State Taxonomy</span>
+                    </h4>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded border border-amber-400/20 bg-amber-500/10 text-amber-300">
+                      Categorization Model
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-400 font-sans leading-relaxed">
                     {dataFlowDescription ||
                       overview?.dataFlow ||
-                      'Traces how information enters the application, passes through business transformations, interacts with storage layers, and exits to clients.'}
+                      'Architectural categorization model of component boundaries (input ingestion, domain transformations, state/storage, and output egress). Unsupported or unconfirmed stages are explicitly labeled UNKNOWN and excluded from active data pathways.'}
                   </p>
                 </div>
 
                 {/* Horizontal or Vertical Data Pipeline Stages */}
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
                   {dataFlowStages.map((stage, idx) => (
                     <div
                       key={stage.stage}
@@ -789,7 +749,15 @@ function ArchitectureViewContent({
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between text-[10px] font-mono">
                           <span className="text-amber-400 font-bold">{stage.stage}</span>
-                          <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-zinc-400">
+                          <span
+                            className={`px-1.5 py-0.5 rounded border ${
+                              stage.badge === 'CONFIRMED'
+                                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                : stage.badge === 'UNKNOWN'
+                                ? 'bg-zinc-500/10 border-zinc-500/30 text-zinc-400'
+                                : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                            }`}
+                          >
                             {stage.badge}
                           </span>
                         </div>
@@ -798,6 +766,21 @@ function ArchitectureViewContent({
                         <p className="text-[11px] text-zinc-400 font-sans leading-relaxed">
                           {stage.description}
                         </p>
+                        {stage.files && stage.files.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-1">
+                            {stage.files.slice(0, 2).map((fp) => (
+                              <button
+                                key={fp}
+                                type="button"
+                                onClick={() => onNavigateToFile(fp)}
+                                className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white/5 hover:bg-cyan-500/15 text-cyan-300 border border-white/10 truncate max-w-[140px]"
+                                title={fp}
+                              >
+                                {fp.split('/').pop()}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       <div className="pt-2 border-t border-white/5 text-[10px] font-mono text-zinc-400 flex items-center justify-between">
@@ -805,8 +788,10 @@ function ArchitectureViewContent({
                         <span className="text-zinc-200 truncate font-semibold">{stage.tech}</span>
                       </div>
 
-                      {/* Visual Arrow connector between stages */}
-                      {idx < dataFlowStages.length - 1 && (
+                      {/* Visual Arrow connector between stages (omitted when connecting to/from UNKNOWN or unconfirmed stages) */}
+                      {idx < dataFlowStages.length - 1 &&
+                        stage.badge !== 'UNKNOWN' &&
+                        dataFlowStages[idx + 1].badge !== 'UNKNOWN' && (
                         <div className="hidden md:flex absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-void border border-white/10 items-center justify-center z-10 text-zinc-400">
                           <ArrowRight className="w-3 h-3 text-cyan-400" />
                         </div>

@@ -165,6 +165,35 @@ export function UnifiedAIInspector({
                 </div>
               ) : fileInsight ? (
                 <>
+                  {/* Analysis Mode Notice */}
+                  {fileInsight.analysisMode === 'deterministic' ? (
+                    <div className="p-2.5 rounded-xl border border-amber-500/30 bg-amber-500/10 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-[10px] font-bold text-amber-300 tracking-wider uppercase block">
+                          Deterministic Fallback
+                        </span>
+                        <p className="text-[11px] text-amber-200/80 font-sans truncate" title={fileInsight.fallbackReason}>
+                          {fileInsight.fallbackReason || 'AI analysis unavailable; showing static AST extraction.'}
+                        </p>
+                      </div>
+                      <button
+                        onClick={onRetryFileInsight}
+                        className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-white/10 hover:bg-white/15 text-white transition-colors"
+                        title="Retry AI explanation"
+                      >
+                        <RefreshCcw className="w-3 h-3" />
+                        <span>Retry</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between px-1">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-cyan-300/90">
+                        <Sparkles className="w-3 h-3" />
+                        {fileInsight.analysisMode === 'cached' ? 'Cached AI Analysis' : 'AI-Generated Analysis'}
+                      </span>
+                    </div>
+                  )}
+
                   {/* File Purpose */}
                   <div className="p-3 rounded-xl border border-white/10 bg-surface/80 space-y-1">
                     <span className="text-[10px] font-bold text-cyan-300 tracking-wider uppercase block">
@@ -405,6 +434,42 @@ export function UnifiedAIInspector({
                       ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
                       : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
 
+                  const isUnanchoredAiRisk =
+                    (risk.detectionMethod === 'ai-architecture-review' || risk.classification === 'INFERRED') &&
+                    (!risk.sourceReferences || risk.sourceReferences.length === 0) &&
+                    (!risk.filePath || risk.filePath === 'root');
+
+                  const tier =
+                    risk.classification ||
+                    (risk.status === 'CONFIRMED' || risk.status === 'CONFIRMED AST'
+                      ? 'CONFIRMED'
+                      : risk.status === 'CONFIRMED_VULNERABILITY'
+                      ? 'CONFIRMED_VULNERABILITY'
+                      : risk.status === 'CONFIRMED_SINK'
+                      ? 'CONFIRMED_SINK'
+                      : risk.status === 'HEURISTIC'
+                      ? 'HEURISTIC'
+                      : 'INFERRED');
+
+                  const tierLabel = isUnanchoredAiRisk
+                    ? 'AI Insight'
+                    : tier === 'CONFIRMED_VULNERABILITY'
+                    ? 'CONFIRMED VULN'
+                    : tier === 'CONFIRMED_SINK'
+                    ? 'CONFIRMED SINK'
+                    : tier;
+
+                  const tierBadgeStyle =
+                    tier === 'CONFIRMED_VULNERABILITY'
+                      ? 'bg-rose-500/10 border-rose-500/20 text-rose-300'
+                      : tier === 'CONFIRMED_SINK'
+                      ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-300'
+                      : tier === 'CONFIRMED'
+                      ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                      : tier === 'HEURISTIC'
+                      ? 'bg-cyan-500/10 border-cyan-500/20 text-cyan-300'
+                      : 'bg-amber-500/10 border-amber-500/20 text-amber-300';
+
                   return (
                     <div
                       key={idx}
@@ -415,16 +480,20 @@ export function UnifiedAIInspector({
                           <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded border ${severityStyle}`}>
                             {risk.severity}
                           </span>
-                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-zinc-400">
-                            INFERRED
+                          <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${tierBadgeStyle}`}>
+                            {tierLabel}
                           </span>
                         </div>
-                        <button
-                          onClick={() => onFocusRisk(risk)}
-                          className="text-[10px] text-cyan-400 hover:underline"
-                        >
-                          Locate Files
-                        </button>
+                        {!isUnanchoredAiRisk ? (
+                          <button
+                            onClick={() => onFocusRisk(risk)}
+                            className="text-[10px] text-cyan-400 hover:underline"
+                          >
+                            Locate Files
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-zinc-500 italic">Unanchored</span>
+                        )}
                       </div>
 
                       <h5 className="text-xs font-semibold text-zinc-100">{risk.title}</h5>

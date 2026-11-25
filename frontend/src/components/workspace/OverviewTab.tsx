@@ -101,7 +101,9 @@ export function OverviewTab({
           </div>
           <div className="p-2 rounded-lg bg-white/5 border border-white/5">
             <span className="text-[10px] text-zinc-500 block uppercase">Framework</span>
-            <span className="text-zinc-200 font-medium truncate block">{overview.framework || 'Node.js'}</span>
+            <span className="text-zinc-200 font-medium truncate block">
+              {overview.framework || (overview.primaryEcosystem === 'python' ? 'None (Python)' : 'None detected')}
+            </span>
           </div>
           <div className="p-2 rounded-lg bg-white/5 border border-white/5">
             <span className="text-[10px] text-zinc-500 block uppercase">Confidence</span>

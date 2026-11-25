@@ -4,8 +4,13 @@ import fs from 'fs';
 import { sessionService } from '../storage/session.service';
 import { promptBuilderService } from '../ai/prompt-builder.service';
 import { openaiService } from '../ai/openai.service';
+import { pythonDependencyService } from './python-dependency.service';
+import { frameworkDetectionService } from './framework-detection.service';
+import { architectureIntelligenceService } from './architecture-intelligence.service';
+import { codeMetricsService } from './code-metrics.service';
 import logger from '../../utils/logger.util';
 import config from '../../config/env.config';
+import { LruCache } from '../../utils/lru-cache.util';
 import type {
   ArchitectureOverview,
   AnalysisRisk,
@@ -22,14 +27,79 @@ import type {
   DependencyGraphNode,
   DependencyGraphEdge,
   DependencyNodeType,
+  PythonDependencyDiagnostics,
+  UnresolvedImportEntry,
+  AmbiguousResolutionEntry,
 } from '../../types/analysis.types';
 import type { FileNode, RepoMetadata, SessionData } from '../../types/repository.types';
 import { detectLanguage } from '../../utils/file-processor.util';
 
+export const ANALYSIS_ENGINE_VERSION = '2.3.9';
+
+export interface CacheMetrics {
+  explanationHits: number;
+  explanationMisses: number;
+  explanationEvictions: number;
+  overviewHits: number;
+  overviewMisses: number;
+  overviewEvictions: number;
+  graphHits: number;
+  graphMisses: number;
+  graphEvictions: number;
+  inFlightOverviewReused: number;
+  aiCallsAvoided: number;
+}
+
 export class AnalysisService {
-  private canonicalCache: Map<string, ArchitectureOverview> = new Map();
+  private explanationCache: LruCache<string, FileExplanation>;
+  private canonicalCache: LruCache<string, ArchitectureOverview>;
+  private dependencyGraphCache: LruCache<string, DependencyGraphData>;
+  private inFlightOverviews: Map<string, Promise<ArchitectureOverview | null>> = new Map();
+
+  private metrics: CacheMetrics = {
+    explanationHits: 0,
+    explanationMisses: 0,
+    explanationEvictions: 0,
+    overviewHits: 0,
+    overviewMisses: 0,
+    overviewEvictions: 0,
+    graphHits: 0,
+    graphMisses: 0,
+    graphEvictions: 0,
+    inFlightOverviewReused: 0,
+    aiCallsAvoided: 0,
+  };
 
   constructor() {
+    this.explanationCache = new LruCache<string, FileExplanation>(
+      config.maxExplanationCacheSize,
+      (key) => {
+        this.metrics.explanationEvictions++;
+        logger.debug('Evicted file explanation from LRU cache', { key });
+      }
+    );
+
+    this.canonicalCache = new LruCache<string, ArchitectureOverview>(
+      config.maxOverviewCacheSize,
+      (key) => {
+        this.metrics.overviewEvictions++;
+        logger.debug('Evicted canonical overview from LRU cache', { key });
+      }
+    );
+
+    this.dependencyGraphCache = new LruCache<string, DependencyGraphData>(
+      config.maxDependencyGraphCacheSize,
+      (key) => {
+        this.metrics.graphEvictions++;
+        logger.debug('Evicted dependency graph from LRU cache', { key });
+      }
+    );
+
+    // Register session cleanup listener to invalidate session-scoped cached data
+    sessionService.onSessionDeleted((sessionId) => {
+      this.invalidateSession(sessionId);
+    });
+
     this.ensureCacheDirectory();
   }
 
@@ -45,23 +115,53 @@ export class AnalysisService {
   }
 
   /**
-   * Compute a deterministic SHA-256 fingerprint representing repository content.
+   * Computes a pure content-based SHA-256 hash across all files in the repository.
+   * Normalizes path separators prior to sorting to guarantee determinism across platforms.
+   * Incorporates the full SHA-256 digest of each file's entire content.
    */
-  public computeFingerprint(session: SessionData): string {
+  public computeContentHash(files: Map<string, string>): string {
     const hash = crypto.createHash('sha256');
-    hash.update(session.metadata.name || 'unnamed');
-    hash.update(String(session.metadata.totalFiles || 0));
-    hash.update(String(session.metadata.totalSize || 0));
+    const normalizedPaths = Array.from(files.keys())
+      .map((p) => p.replace(/\\/g, '/'))
+      .sort();
 
-    // Sort file paths to ensure consistent fingerprint
-    const sortedPaths = Array.from(session.files.keys()).sort();
-    for (const filePath of sortedPaths.slice(0, 500)) {
-      hash.update(filePath);
-      const content = session.files.get(filePath) || '';
-      hash.update(String(content.length));
-      // Sample first 100 characters of each file
-      hash.update(content.substring(0, 100));
+    const seen = new Set<string>();
+    for (const normPath of normalizedPaths) {
+      if (seen.has(normPath)) continue;
+      seen.add(normPath);
+
+      hash.update(normPath);
+      hash.update('\0');
+      const content = files.get(normPath) ?? files.get(normPath.replace(/\//g, '\\')) ?? '';
+      const fileDigest = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+      hash.update(fileDigest);
+      hash.update('\0');
     }
+    return hash.digest('hex');
+  }
+
+  /**
+   * Compute a deterministic SHA-256 fingerprint representing repository content,
+   * archive-level manifest digest, and analysis engine version.
+   * Separates origin metadata from content identity.
+   * Incorporates rawManifestHash (across ALL files before sampling) to ensure any change
+   * outside the analyzed subset invalidates the fingerprint.
+   */
+  public computeFingerprint(
+    session: SessionData,
+    options?: { engineVersion?: string }
+  ): string {
+    const hash = crypto.createHash('sha256');
+    const engineVer = options?.engineVersion || ANALYSIS_ENGINE_VERSION;
+    hash.update(`engine:${engineVer}\n`);
+
+    // Incorporate raw manifest digest across ALL accepted files before sampling (Priority 1)
+    const manifestHash = session.rawManifestHash || this.computeContentHash(session.files);
+    hash.update(`manifest:${manifestHash}\n`);
+
+    // Incorporate active session files content hash (Priority 3)
+    const contentHash = session.contentHash || this.computeContentHash(session.files);
+    hash.update(`content:${contentHash}\n`);
 
     return hash.digest('hex');
   }
@@ -77,6 +177,19 @@ export class AnalysisService {
       if (fs.existsSync(filePath)) {
         const raw = fs.readFileSync(filePath, 'utf8');
         const parsed = JSON.parse(raw) as ArchitectureOverview;
+        if (
+          parsed.analysisMode === 'deterministic' ||
+          (Array.isArray(parsed.unknowns) &&
+            parsed.unknowns.some((u) => typeof u === 'string' && u.includes('AI enrichment unavailable')))
+        ) {
+          logger.warn('Purging degraded deterministic entry from disk cache', { fingerprint });
+          try {
+            fs.unlinkSync(filePath);
+          } catch {
+            // Non-fatal cleanup
+          }
+          return null;
+        }
         parsed.analysisMode = 'cached';
         return parsed;
       }
@@ -87,50 +200,228 @@ export class AnalysisService {
   }
 
   private writeToDiskCache(fingerprint: string, overview: ArchitectureOverview): void {
+    if (overview.analysisMode !== 'ai-enriched' && overview.analysisMode !== 'cached') {
+      return;
+    }
     try {
-      const filePath = this.getCacheFilePath(fingerprint);
-      fs.writeFileSync(filePath, JSON.stringify(overview, null, 2), 'utf8');
+      const cacheDir = path.join(config.sessionsDir, 'cache');
+      const safeId = fingerprint.replace(/[^a-zA-Z0-9_-]/g, '');
+      const targetPath = path.join(cacheDir, `canonical-${safeId}.json`);
+      const tmpPath = path.join(
+        cacheDir,
+        `.canonical-${safeId}.tmp.${Date.now()}.${crypto.randomBytes(4).toString('hex')}`
+      );
+
+      fs.writeFileSync(tmpPath, JSON.stringify(overview, null, 2), 'utf8');
+      fs.renameSync(tmpPath, targetPath);
+
+      // Enforce disk cache TTL and storage budget
+      this.cleanExpiredDiskCache();
     } catch (err) {
       logger.warn('Failed to write to disk cache', { fingerprint, err });
     }
   }
 
+  public cleanExpiredDiskCache(): { deletedExpired: number; deletedEvicted: number } {
+    let deletedExpired = 0;
+    let deletedEvicted = 0;
+    try {
+      const cacheDir = path.join(config.sessionsDir, 'cache');
+      if (!fs.existsSync(cacheDir)) {
+        return { deletedExpired: 0, deletedEvicted: 0 };
+      }
+
+      const entries = fs.readdirSync(cacheDir, { withFileTypes: true });
+      const now = Date.now();
+      const ttlMs = config.canonicalDiskCacheTTL * 1000;
+      const validFiles: Array<{ name: string; fullPath: string; size: number; mtimeMs: number }> = [];
+
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const fullPath = path.join(cacheDir, entry.name);
+
+        // Clean up orphaned temporary files older than 1 hour
+        if (entry.name.startsWith('.')) {
+          try {
+            const stat = fs.statSync(fullPath);
+            if (now - stat.mtimeMs > 3600 * 1000) {
+              fs.unlinkSync(fullPath);
+            }
+          } catch {}
+          continue;
+        }
+
+        if (!entry.name.startsWith('canonical-') || !entry.name.endsWith('.json')) {
+          continue;
+        }
+
+        try {
+          const stat = fs.statSync(fullPath);
+          if (now - stat.mtimeMs > ttlMs) {
+            fs.unlinkSync(fullPath);
+            deletedExpired++;
+          } else {
+            validFiles.push({
+              name: entry.name,
+              fullPath,
+              size: stat.size,
+              mtimeMs: stat.mtimeMs,
+            });
+          }
+        } catch {}
+      }
+
+      // Check storage byte budget
+      let totalBytes = validFiles.reduce((acc, f) => acc + f.size, 0);
+      const maxBytes = config.maxCanonicalDiskCacheBytes;
+
+      if (totalBytes > maxBytes) {
+        // Sort oldest first for LRU disk eviction
+        validFiles.sort((a, b) => a.mtimeMs - b.mtimeMs);
+        const targetBudget = Math.floor(maxBytes * 0.8);
+
+        for (const file of validFiles) {
+          if (totalBytes <= targetBudget) break;
+          try {
+            fs.unlinkSync(file.fullPath);
+            totalBytes -= file.size;
+            deletedEvicted++;
+          } catch {}
+        }
+      }
+    } catch (err) {
+      logger.warn('Error during disk cache cleanup', { err });
+    }
+
+    return { deletedExpired, deletedEvicted };
+  }
+
   /**
    * Generate or retrieve the canonical architecture analysis for a session.
    * Guaranteed to be consistent, non-empty, and evidence-grounded.
+   * Utilizes in-flight request coalescing to prevent duplicate Groq calls.
    */
-  async generateOverview(sessionId: string): Promise<ArchitectureOverview | null> {
+  async generateOverview(
+    sessionId: string,
+    options?: { forceRefresh?: boolean; [key: string]: any }
+  ): Promise<ArchitectureOverview | null> {
     const session = sessionService.getSession(sessionId);
     if (!session) {
       return null;
     }
 
-    // 1. Session memory cache check
-    if ((session as any).cachedOverview) {
-      return (session as any).cachedOverview;
-    }
-
-    // 2. Repository content fingerprint check (memory & disk)
     const fingerprint = this.computeFingerprint(session);
-    if (this.canonicalCache.has(fingerprint)) {
-      const cached = this.canonicalCache.get(fingerprint)!;
-      (session as any).cachedOverview = cached;
-      logger.info('Returning canonical analysis from in-memory cache', { sessionId, fingerprint });
-      return cached;
+    const engineVersion = ANALYSIS_ENGINE_VERSION;
+    const optionsKey = options && Object.keys(options).length > 0 ? `:${JSON.stringify(options)}` : '';
+    const inFlightKey = `${fingerprint}${optionsKey}`;
+
+    if (!options?.forceRefresh) {
+      // 1. Session memory cache check — validated against exact fingerprint and engine version
+      const sessionCached = session.cachedOverview as ArchitectureOverview | undefined;
+      const sessionFp = session.cachedOverviewFingerprint;
+      const sessionVer = session.cachedOverviewEngineVersion;
+
+      if (
+        sessionCached &&
+        sessionFp === fingerprint &&
+        sessionVer === engineVersion &&
+        sessionCached.analysisMode !== 'deterministic'
+      ) {
+        this.metrics.overviewHits++;
+        return {
+          ...this.cloneOverview(sessionCached),
+          analysisMode: 'cached',
+        };
+      } else if (sessionCached && (sessionFp !== fingerprint || sessionVer !== engineVersion)) {
+        // Purge stale session cache entry
+        delete session.cachedOverview;
+        delete session.cachedOverviewFingerprint;
+        delete session.cachedOverviewEngineVersion;
+      }
+
+      // 2. Repository content fingerprint check (memory)
+      if (this.canonicalCache.has(fingerprint)) {
+        const cached = this.canonicalCache.get(fingerprint)!;
+        if (cached.analysisMode !== 'deterministic') {
+          session.cachedOverview = cached;
+          session.cachedOverviewFingerprint = fingerprint;
+          session.cachedOverviewEngineVersion = engineVersion;
+          this.metrics.overviewHits++;
+          logger.info('Returning canonical analysis from in-memory cache', { sessionId, fingerprint });
+          return {
+            ...this.cloneOverview(cached),
+            analysisMode: 'cached',
+          };
+        }
+        this.canonicalCache.delete(fingerprint);
+      }
+
+      // 3. Disk cache check
+      const diskCached = this.readFromDiskCache(fingerprint);
+      if (diskCached) {
+        this.canonicalCache.set(fingerprint, diskCached);
+        session.cachedOverview = diskCached;
+        session.cachedOverviewFingerprint = fingerprint;
+        session.cachedOverviewEngineVersion = engineVersion;
+        this.metrics.overviewHits++;
+        logger.info('Returning canonical analysis from disk cache', { sessionId, fingerprint });
+        return this.cloneOverview(diskCached);
+      }
     }
 
-    const diskCached = this.readFromDiskCache(fingerprint);
-    if (diskCached) {
-      this.canonicalCache.set(fingerprint, diskCached);
-      (session as any).cachedOverview = diskCached;
-      logger.info('Returning canonical analysis from disk cache', { sessionId, fingerprint });
-      return diskCached;
+    // 4. In-flight coalescing check
+    if (this.inFlightOverviews.has(inFlightKey)) {
+      this.metrics.inFlightOverviewReused++;
+      this.metrics.aiCallsAvoided++;
+      logger.info('Reusing in-flight overview promise for concurrent request', {
+        sessionId,
+        fingerprint,
+        inFlightKey,
+      });
+      const inFlightPromise = this.inFlightOverviews.get(inFlightKey)!;
+      const result = await inFlightPromise;
+      if (result) {
+        if (result.analysisMode === 'ai-enriched') {
+          session.cachedOverview = result;
+          session.cachedOverviewFingerprint = fingerprint;
+          session.cachedOverviewEngineVersion = ANALYSIS_ENGINE_VERSION;
+        }
+        return this.cloneOverview(result);
+      }
+      return null;
     }
 
-    // 3. Build rich deterministic canonical foundation
+    this.metrics.overviewMisses++;
+
+    // 5. Create in-flight promise and register it
+    const overviewPromise = (async () => {
+      try {
+        return await this.executeOverviewGeneration(session, fingerprint);
+      } finally {
+        this.inFlightOverviews.delete(inFlightKey);
+      }
+    })();
+
+    this.inFlightOverviews.set(inFlightKey, overviewPromise);
+
+    const result = await overviewPromise;
+    if (result) {
+      if (result.analysisMode === 'ai-enriched') {
+        (session as any).cachedOverview = result;
+      }
+      return this.cloneOverview(result);
+    }
+    return null;
+  }
+
+  private async executeOverviewGeneration(
+    session: SessionData,
+    fingerprint: string
+  ): Promise<ArchitectureOverview> {
+    // Build rich deterministic canonical foundation
     const deterministic = this.generateDeterministicCanonical(session, fingerprint);
 
-    // 4. Controlled AI Enrichment (prompt-capped to avoid Groq 8000 TPM limit)
+    // Controlled AI Enrichment (prompt-capped to avoid Groq 8000 TPM limit)
     let finalOverview = deterministic;
     try {
       const fileTree = this.renderTree(session.fileTree);
@@ -146,7 +437,7 @@ export class AnalysisService {
       const rawResponse = await openaiService.generateCompletion(
         prompt,
         'You are a senior software architect. Return strict JSON only matching the schema.',
-        { temperature: 0.1, maxTokens: 3000 }
+        { temperature: 0.1, maxTokens: 3000, responseFormat: { type: 'json_object' } }
       );
 
       const aiParsed = this.parseOverview(rawResponse, deterministic);
@@ -155,7 +446,7 @@ export class AnalysisService {
       finalOverview.contentHash = fingerprint;
 
       logger.info('Canonical architecture overview enriched with AI', {
-        sessionId,
+        sessionId: session.sessionId,
         fingerprint,
         responseLength: rawResponse.length,
         evidenceCount: finalOverview.evidence.length,
@@ -165,7 +456,7 @@ export class AnalysisService {
     } catch (error: any) {
       const errMsg = error instanceof Error ? error.message : String(error);
       logger.warn('AI overview enrichment failed, preserving deterministic canonical analysis', {
-        sessionId,
+        sessionId: session.sessionId,
         fingerprint,
         error: errMsg,
       });
@@ -176,10 +467,14 @@ export class AnalysisService {
       ];
     }
 
-    // 5. Store in memory and persistent disk cache
-    this.canonicalCache.set(fingerprint, finalOverview);
-    this.writeToDiskCache(fingerprint, finalOverview);
-    (session as any).cachedOverview = finalOverview;
+    // Store ONLY verified AI-enriched overviews in memory and persistent disk cache
+    if (finalOverview.analysisMode === 'ai-enriched') {
+      this.canonicalCache.set(fingerprint, finalOverview);
+      this.writeToDiskCache(fingerprint, finalOverview);
+      session.cachedOverview = finalOverview;
+      session.cachedOverviewFingerprint = fingerprint;
+      session.cachedOverviewEngineVersion = ANALYSIS_ENGINE_VERSION;
+    }
 
     return finalOverview;
   }
@@ -197,62 +492,111 @@ export class AnalysisService {
     const metadata = session.metadata;
 
     const detectedEntryPoints = this.inferEntryPoints(files);
-    const techStack = this.inferTechStack(files, metadata);
-    const framework = this.detectFramework(files, metadata);
+    const detection = frameworkDetectionService.detect(files, metadata);
+    const techStack = detection.techStack.length > 0 ? detection.techStack : this.inferTechStack(files, metadata);
+    const framework = detection.primaryFramework;
     const pattern = this.detectArchitecturalPattern(files, framework);
 
-    // 1. Extract Key Modules
-    const keyModules = this.extractDeterministicModules(files, detectedEntryPoints);
+    // 1. Compute real dependency graph (JS/TS + Python AST) and extract source signals
+    const graph = this.computeDependencyGraph(session);
+    const signals = architectureIntelligenceService.extractRepoSignals(files);
 
-    // 2. Extract Architecture Layers
-    const architectureLayers = this.extractArchitectureLayers(keyModules, files);
+    // 1b. Compute accurate language-aware code metrics, cyclomatic complexity & test intelligence
+    const codeMetrics = codeMetricsService.computeRepositoryMetrics(files, metadata);
 
-    // 3. Extract Execution Flow
-    const executionFlow = this.extractExecutionFlow(detectedEntryPoints, keyModules, framework);
+    // 2. Extract Key Modules backed by resolved graph edges & symbols
+    const keyModules = architectureIntelligenceService.extractKeyModules(
+      files,
+      graph,
+      detectedEntryPoints,
+      signals
+    );
 
-    // 4. Extract Data Flow Stages
-    const dataFlow = this.extractDataFlowNarrative(framework, keyModules, detectedEntryPoints);
+    // 3. Extract Dynamic Repository-Specific Architecture Layers
+    const architectureLayers = architectureIntelligenceService.extractDynamicArchitectureLayers(
+      keyModules,
+      graph,
+      detectedEntryPoints
+    );
 
-    // 5. Extract Deterministic Risks
-    const risks = this.extractDeterministicRisks(files, keyModules);
+    // 4. Extract Dynamic Entry-to-Target Execution Flow
+    const executionFlow = architectureIntelligenceService.extractDynamicExecutionFlow(
+      detectedEntryPoints,
+      graph,
+      keyModules,
+      detection,
+      signals
+    );
 
-    // 6. Extract AST Evidence
+    // 5. Extract Repository-Specific Data Flow & State Lifecycle
+    const { narrative: dataFlow, stages: dataFlowStages } =
+      architectureIntelligenceService.extractDynamicDataFlow(
+        files,
+        graph,
+        detection,
+        detectedEntryPoints,
+        signals
+      );
+
+    // 6. Detect Evidence-Based Risks (CONFIRMED / INFERRED / HEURISTIC) & Limitations
+    const { risks, limitations: analysisLimitations } =
+      architectureIntelligenceService.detectEvidenceBasedRisks(files, graph, detection);
+
+    // 7. Extract Grounded Source Evidence
     const evidence: EvidenceItem[] = [];
     if (detectedEntryPoints.length > 0) {
       evidence.push({
         filePath: detectedEntryPoints[0],
-        finding: `Primary application entry point detected at ${detectedEntryPoints[0]}.`,
-        relevance: 'Initializes application lifecycle and mounts routers/middleware.',
+        finding: `Entry module identified at ${detectedEntryPoints[0]}${detectedEntryPoints.length > 1 ? ` (+${detectedEntryPoints.length - 1} more)` : ''}.`,
+        relevance: 'Verified entry / public interface location in repository tree.',
       });
     }
     for (const mod of keyModules.slice(0, 5)) {
       evidence.push({
         filePath: mod.path,
-        finding: `Core architectural module '${mod.name}' verified with ${mod.dependencies?.length || 0} dependencies.`,
+        finding: mod.evidence || `Module '${mod.name}' verified in ${mod.path}.`,
         relevance: mod.responsibility,
       });
     }
+    for (const r of risks.slice(0, 3)) {
+      if (r.filePath && files.has(r.filePath)) {
+        evidence.push({
+          filePath: r.filePath,
+          finding: `[${r.classification || 'INFERRED'}] ${r.title}`,
+          relevance: r.evidence || r.detail,
+        });
+      }
+    }
 
-    // 7. Calculate Deterministic Scorecard
+    // 8. Calculate Deterministic Scorecard
     const scorecard = this.calculateDeterministicScorecard(files, risks, keyModules);
 
-    // 8. Executive Narrative
-    const summary = `${metadata.name} is a ${framework ? framework + '-based ' : ''}${metadata.totalFiles}-file application implementing a ${pattern} pattern. Architecture is structured into ${architectureLayers.length} distinct layers across ${keyModules.length} primary modules with entry point at ${detectedEntryPoints[0] || 'index'}.`;
+    // 9. Repository-Specific Executive Summary & Deep Dive
+    const moduleNamesPreview = keyModules.slice(0, 3).map((m) => m.name).join(', ') || 'primary modules';
+    const layerNamesPreview = architectureLayers.map((l) => l.name).join(', ') || 'flat structure';
+    const confirmedRisksCount = risks.filter((r) => r.classification === 'CONFIRMED').length;
+
+    const summary = `${metadata.name} is a ${detection.projectType} (${metadata.totalFiles} files, primary ecosystem: ${detection.primaryEcosystem}). Analysis mapped ${keyModules.length} core modules (${moduleNamesPreview}) and ${graph.summary.totalEdges} resolved internal dependency edges across ${architectureLayers.length} architectural layers${detectedEntryPoints.length > 0 ? ` anchored at ${detectedEntryPoints[0]}` : ''}.`;
 
     const executiveBullets = [
-      `Architectural Pattern: ${pattern} with ${keyModules.length} verified modules.`,
-      `Primary Runtime Entry: ${detectedEntryPoints.slice(0, 3).join(', ') || 'Root module'}.`,
-      `Technology Foundation: ${techStack.slice(0, 5).join(', ')}.`,
-      `Analyzed Scope: ${metadata.totalFiles} files (${Math.round(metadata.totalSize / 1024)} KB source payload).`,
+      `Classification: ${detection.projectType} (${detection.primaryEcosystem} ecosystem, pattern: ${pattern}).`,
+      `Dependencies: ${graph.summary.totalNodes} source nodes and ${graph.summary.totalEdges} resolved internal import edges.`,
+      `Key Modules: ${keyModules.slice(0, 4).map((m) => `${m.name} (${m.path})`).join(', ') || 'Single-module layout'}.`,
+      `Technology Foundation: ${techStack.slice(0, 6).join(', ') || 'Standard runtime'}.`,
     ];
 
     const deepDive: DeepDiveExplanation = {
-      architectureNarrative: `The system follows a ${pattern}. Core logic is cleanly partitioned into ${architectureLayers.map((l) => l.name).join(', ')}.`,
-      runtimeFlow: `Execution begins at ${detectedEntryPoints[0] || 'the entry file'}, passes through routing and middleware checks, invokes business services, and returns structured client responses.`,
-      dataLifecycle: `Incoming payloads are ingested through route endpoints, validated, processed by domain services, and serialized for response delivery.`,
-      qualitySignals: `Codebase contains ${keyModules.length} core functional units with ${risks.length} flagged maintainability/security observations.`,
-      scalabilityAndOps: `Stateless module architecture facilitates horizontal clustering and containerized runtime deployment.`,
-      recommendations: risks.slice(0, 3).map((r) => r.mitigation).join(' ') || 'Maintain current modular boundaries and comprehensive test coverage.',
+      architectureNarrative: `${metadata.name} organizes ${keyModules.length} core modules into ${layerNamesPreview} (${graph.summary.totalEdges} resolved internal edges).`,
+      runtimeFlow: executionFlow.map((s) => `Stage ${s.step} [${s.statusLabel}] ${s.title}: ${s.description}`).join(' '),
+      dataLifecycle: dataFlowStages.map((s) => `${s.stage} [${s.classification}]: ${s.description}`).join(' '),
+      qualitySignals: `Detected ${risks.length} risk item(s) (${confirmedRisksCount} confirmed) across ${metadata.totalFiles} inspected files.`,
+      scalabilityAndOps:
+        graph.circularDependencies && graph.circularDependencies.length > 0
+          ? `Resolved dependency graph surfaced ${graph.circularDependencies.length} circular module dependency cycle(s) that may affect initialization order and modularity.`
+          : `No circular internal module dependencies detected among ${graph.summary.totalNodes} indexed nodes.`,
+      recommendations:
+        risks.slice(0, 3).map((r) => r.mitigation).join(' ') ||
+        'Keep module boundaries decoupled and maintain automated test coverage for core entry paths.',
     };
 
     return {
@@ -260,56 +604,28 @@ export class AnalysisService {
       executiveBullets,
       pattern,
       techStack,
-      projectType: framework || (techStack[0] ? `${techStack[0]} application` : 'Application'),
+      projectType: detection.projectType,
       framework,
+      primaryEcosystem: detection.primaryEcosystem,
+      detectedTechnologies: detection.technologies,
       keyModules,
       dataFlow,
+      dataFlowStages,
       deepDive,
       scorecard,
       detectedEntryPoints,
       integrationPoints: detectedEntryPoints.slice(0, 5),
       risks,
       evidence,
-      confidence: 82,
+      confidence: graph.summary.totalEdges > 0 || keyModules.length >= 2 ? 82 : 68,
       unknowns: [],
+      analysisLimitations,
       analysisMode: 'deterministic',
       contentHash: fingerprint,
       executionFlow,
       architectureLayers,
+      codeMetrics,
     };
-  }
-
-  private detectFramework(files: Map<string, string>, metadata: RepoMetadata): string | undefined {
-    const fileKeys = Array.from(files.keys()).map((k) => k.toLowerCase());
-    const pkgContent = files.get('package.json') || '';
-
-    if (pkgContent.includes('"express"') || fileKeys.some((f) => f.includes('lib/express.js') || f.includes('express.js'))) {
-      return 'Express.js';
-    }
-    if (pkgContent.includes('"next"') || fileKeys.some((f) => f.includes('next.config'))) {
-      return 'Next.js';
-    }
-    if (pkgContent.includes('"react"') || fileKeys.some((f) => f.includes('react'))) {
-      return 'React';
-    }
-    if (pkgContent.includes('"fastify"')) return 'Fastify';
-    if (pkgContent.includes('"nest"') || pkgContent.includes('@nestjs/core')) return 'NestJS';
-
-    for (const [path, content] of files.entries()) {
-      if (path.endsWith('.py')) {
-        if (content.includes('import flask') || content.includes('from flask import')) return 'Flask';
-        if (content.includes('import django') || content.includes('from django')) return 'Django';
-        if (content.includes('import fastapi') || content.includes('from fastapi')) return 'FastAPI';
-      }
-    }
-
-    if (metadata.languages['javascript'] || metadata.languages['typescript']) {
-      return 'Node.js';
-    }
-    if (metadata.languages['python']) {
-      return 'Python';
-    }
-    return undefined;
   }
 
   private detectArchitecturalPattern(files: Map<string, string>, framework?: string): string {
@@ -328,217 +644,6 @@ export class AnalysisService {
       return 'Component-Driven Architecture';
     }
     return 'Modular Layered Architecture';
-  }
-
-  private extractDeterministicModules(
-    files: Map<string, string>,
-    entryPoints: string[]
-  ): KeyModule[] {
-    const modules: KeyModule[] = [];
-    const scoredCandidates: { path: string; name: string; score: number; responsibility: string; deps: string[] }[] = [];
-
-    for (const [filePath, content] of files.entries()) {
-      const lower = filePath.toLowerCase();
-      // Skip test files, mock files, configs
-      if (lower.includes('test') || lower.includes('spec') || lower.endsWith('.json') || lower.endsWith('.md')) {
-        continue;
-      }
-
-      let score = 0;
-      const baseName = path.basename(filePath, path.extname(filePath));
-      const dirName = path.dirname(filePath);
-
-      if (entryPoints.includes(filePath)) score += 5;
-      if (lower.startsWith('lib/') || lower.startsWith('src/')) score += 4;
-      if (lower.includes('router') || lower.includes('route')) score += 3;
-      if (lower.includes('application') || lower.includes('app.')) score += 3;
-      if (lower.includes('service') || lower.includes('controller')) score += 3;
-      if (lower.includes('model') || lower.includes('db')) score += 2;
-      if (lower.includes('middleware') || lower.includes('auth')) score += 2;
-
-      // Extract dependencies
-      const deps: string[] = [];
-      const importRegex = /(?:require\(['"]([^'"]+)['"]\)|from\s+['"]([^'"]+)['"])/g;
-      let m: RegExpExecArray | null;
-      while ((m = importRegex.exec(content)) !== null) {
-        const dep = m[1] || m[2];
-        if (dep && !deps.includes(dep)) deps.push(dep);
-      }
-
-      let responsibility = `Handles core ${baseName} operations in the ${dirName !== '.' ? dirName : 'root'} layer.`;
-      if (lower.includes('router')) responsibility = 'Manages URL route dispatching, path resolution, and route-level middleware pipelines.';
-      else if (lower.includes('application')) responsibility = 'Encapsulates main server state, settings management, and middleware composition.';
-      else if (lower.includes('request')) responsibility = 'Provides HTTP request abstractions, header parsing, and parameter accessors.';
-      else if (lower.includes('response')) responsibility = 'Manages HTTP response stream formatting, headers, status codes, and body serialization.';
-      else if (lower.includes('view')) responsibility = 'Handles template rendering, layout resolution, and view engine delegation.';
-      else if (lower.includes('auth') || lower.includes('guard')) responsibility = 'Enforces authentication validation, access control, and token verification.';
-
-      if (score > 1 || files.size < 15) {
-        scoredCandidates.push({
-          path: filePath,
-          name: baseName.charAt(0).toUpperCase() + baseName.slice(1),
-          score: score + Math.min(3, deps.length * 0.5),
-          responsibility,
-          deps: deps.slice(0, 8),
-        });
-      }
-    }
-
-    scoredCandidates.sort((a, b) => b.score - a.score);
-
-    for (const item of scoredCandidates.slice(0, 10)) {
-      modules.push({
-        name: item.name,
-        path: item.path,
-        responsibility: item.responsibility,
-        dependencies: item.deps,
-        evidence: `Verified in ${item.path} with ${item.deps.length} imported dependencies.`,
-      });
-    }
-
-    // Fallback if no modules scored
-    if (modules.length === 0) {
-      const firstEntry = entryPoints[0] || Array.from(files.keys())[0] || 'index.js';
-      modules.push({
-        name: 'MainModule',
-        path: firstEntry,
-        responsibility: 'Root application coordinator and workflow coordinator.',
-        dependencies: [],
-      });
-    }
-
-    return modules;
-  }
-
-  private extractArchitectureLayers(
-    modules: KeyModule[],
-    files: Map<string, string>
-  ): ArchitectureLayer[] {
-    const layers: ArchitectureLayer[] = [
-      {
-        name: 'Entry & Presentation Layer',
-        description: 'Server bootstrap, HTTP routing, and public interface endpoints.',
-        modules: [],
-        files: [],
-      },
-      {
-        name: 'Middleware & Security Layer',
-        description: 'Request parsing, validation, authentication, and error propagation.',
-        modules: [],
-        files: [],
-      },
-      {
-        name: 'Domain Logic & Services Layer',
-        description: 'Core business processing, algorithmic engines, and application state.',
-        modules: [],
-        files: [],
-      },
-      {
-        name: 'Data Access & Utilities Layer',
-        description: 'Low-level helpers, models, serialization, and storage abstraction.',
-        modules: [],
-        files: [],
-      },
-    ];
-
-    for (const mod of modules) {
-      const lower = mod.path.toLowerCase();
-      if (lower.includes('index') || lower.includes('server') || lower.includes('app') || lower.includes('route')) {
-        layers[0].modules.push(mod.name);
-        layers[0].files.push(mod.path);
-      } else if (lower.includes('middleware') || lower.includes('guard') || lower.includes('auth')) {
-        layers[1].modules.push(mod.name);
-        layers[1].files.push(mod.path);
-      } else if (lower.includes('service') || lower.includes('core') || lower.includes('lib') || lower.includes('engine')) {
-        layers[2].modules.push(mod.name);
-        layers[2].files.push(mod.path);
-      } else {
-        layers[3].modules.push(mod.name);
-        layers[3].files.push(mod.path);
-      }
-    }
-
-    // Ensure all layers have at least placeholder file references if empty
-    for (const [filePath] of files.entries()) {
-      const lower = filePath.toLowerCase();
-      if (layers[1].files.length === 0 && lower.includes('middleware')) {
-        layers[1].files.push(filePath);
-      }
-    }
-
-    return layers;
-  }
-
-  private extractExecutionFlow(
-    entryPoints: string[],
-    modules: KeyModule[],
-    framework?: string
-  ): ExecutionFlowStep[] {
-    const entryFile = entryPoints[0] || modules[0]?.path || 'src/index.ts';
-
-    const routeModule = modules.find((m) => m.path.toLowerCase().includes('route') || m.name.toLowerCase().includes('router'))?.path;
-    const appModule = modules.find((m) => m.path.toLowerCase().includes('application') || m.path.toLowerCase().includes('app'))?.path;
-    const serviceModule = modules.find((m) => m.path.toLowerCase().includes('service') || m.path.toLowerCase().includes('lib'))?.path;
-    const responseModule = modules.find((m) => m.path.toLowerCase().includes('response') || m.path.toLowerCase().includes('view'))?.path;
-
-    return [
-      {
-        step: 1,
-        title: 'Application Bootstrap & Ingestion',
-        stage: 'entry',
-        description: `Runtime initializes environment, binds network listeners, and instantiates the ${framework || 'application'} core.`,
-        files: [entryFile],
-        statusLabel: 'CONFIRMED',
-        confidence: 95,
-      },
-      {
-        step: 2,
-        title: 'Middleware & Security Dispatch',
-        stage: 'middleware',
-        description: 'Incoming requests pass through body parsing, parameter validation, and security middleware in strict registration sequence.',
-        files: appModule ? [appModule] : [entryFile],
-        statusLabel: 'CONFIRMED',
-        confidence: 90,
-      },
-      {
-        step: 3,
-        title: 'Route Resolution & Parameter Parsing',
-        stage: 'route',
-        description: 'URL path and HTTP verb are evaluated against registered route trees to identify the target handler.',
-        files: routeModule ? [routeModule] : [entryFile],
-        statusLabel: routeModule ? 'CONFIRMED' : 'INFERRED',
-        confidence: routeModule ? 90 : 75,
-      },
-      {
-        step: 4,
-        title: 'Domain Logic & Core Processing',
-        stage: 'service',
-        description: 'Matched controllers execute business rules, transform payload state, and orchestrate domain services.',
-        files: serviceModule ? [serviceModule] : [entryFile],
-        statusLabel: serviceModule ? 'CONFIRMED' : 'INFERRED',
-        confidence: 85,
-      },
-      {
-        step: 5,
-        title: 'Response Serialization & Egress',
-        stage: 'egress',
-        description: 'Results are serialized into HTTP response format with appropriate headers, status codes, and body payloads.',
-        files: responseModule ? [responseModule] : [entryFile],
-        statusLabel: responseModule ? 'CONFIRMED' : 'INFERRED',
-        confidence: 85,
-      },
-    ];
-  }
-
-  private extractDataFlowNarrative(
-    framework: string | undefined,
-    modules: KeyModule[],
-    entryPoints: string[]
-  ): string {
-    const entry = entryPoints[0] || 'entry file';
-    const moduleNames = modules.slice(0, 4).map((m) => m.name).join(', ');
-
-    return `1. Ingestion: Requests arrive at ${entry} via ${framework || 'standard HTTP'}.\n2. Validation: Request headers, parameters, and payloads are checked by middleware.\n3. Processing: Control is dispatched through ${moduleNames} for domain computation.\n4. Persistence/State: Application state is mutated or read from in-memory stores or external services.\n5. Egress: Serialized responses are streamed back to the client.`;
   }
 
   private extractDeterministicRisks(
@@ -632,8 +737,10 @@ export class AnalysisService {
     const totalFiles = files.size;
     const hasReadme = Array.from(files.keys()).some((k) => /readme/i.test(k));
     const hasTests = Array.from(files.keys()).some((k) => /test|spec/i.test(k));
-    const highRisks = risks.filter((r) => r.severity === 'high').length;
-    const medRisks = risks.filter((r) => r.severity === 'medium').length;
+    // Exclude bundled third-party code findings from first-party repository risk scoring
+    const firstPartyRisks = risks.filter((r) => r.provenance !== 'bundled-third-party');
+    const highRisks = firstPartyRisks.filter((r) => r.severity === 'high').length;
+    const medRisks = firstPartyRisks.filter((r) => r.severity === 'medium').length;
 
     const architecture = Math.min(95, Math.max(50, 75 + (modules.length >= 5 ? 10 : 0) - highRisks * 5));
     const maintainability = Math.min(95, Math.max(45, 80 - highRisks * 8 - medRisks * 4 + (hasReadme ? 5 : 0)));
@@ -678,20 +785,40 @@ export class AnalysisService {
     }
     const keyModules = Array.from(moduleMap.values()).slice(0, 10);
 
-    // Merge risks: Combine deterministic static findings with AI findings
+    // Merge risks: Combine deterministic evidence-backed findings with clearly labeled AI inferences
     const riskTitles = new Set<string>();
     const mergedRisks: AnalysisRisk[] = [];
     for (const r of deterministic.risks) {
       riskTitles.add(r.title.toLowerCase());
       mergedRisks.push(r);
     }
+    const knownPaths = new Set([
+      ...deterministic.keyModules.map((m) => m.path),
+      ...deterministic.evidence.map((e) => e.filePath),
+      ...(deterministic.detectedEntryPoints || []),
+      ...(ai.keyModules || []).map((m) => m.path),
+    ]);
     for (const r of ai.risks || []) {
       if (r && r.title && !riskTitles.has(r.title.toLowerCase())) {
         riskTitles.add(r.title.toLowerCase());
+        const verifiedPath = r.filePath && knownPaths.has(r.filePath) ? r.filePath : undefined;
+        const sourceRefs = Array.isArray(r.sourceReferences) && r.sourceReferences.length > 0
+          ? r.sourceReferences
+          : (verifiedPath ? [{ filePath: verifiedPath, label: 'AI referenced file' }] : []);
+        const hasSourceRefs = sourceRefs.length > 0;
+        // Cap unanchored AI observations at medium
+        const rawSeverity = String(r.severity || 'medium').toLowerCase();
+        const severity = (!verifiedPath && !hasSourceRefs && rawSeverity === 'high') ? 'medium' : (rawSeverity === 'low' || rawSeverity === 'medium' || rawSeverity === 'high' ? rawSeverity : 'medium');
         mergedRisks.push({
           ...r,
-          status: 'INFERRED RISK',
-          confidence: 80,
+          severity,
+          ...(verifiedPath ? { filePath: verifiedPath } : { filePath: undefined }),
+          sourceReferences: sourceRefs,
+          status: 'INFERRED',
+          classification: 'INFERRED',
+          detectionMethod: 'ai-architecture-review',
+          confidence: verifiedPath ? 72 : 58,
+          provenance: 'first-party',
         });
       }
     }
@@ -748,8 +875,32 @@ export class AnalysisService {
       return null;
     }
 
+    const contentHash = crypto.createHash('sha256').update(fileContent, 'utf8').digest('hex');
+    const normPath = actualPath.replace(/\\/g, '/');
+    const repoContext = session.sourceUrl || session.metadata?.name || 'unnamed';
+    const cacheKey = `${ANALYSIS_ENGINE_VERSION}:${repoContext}:${normPath}:${contentHash}`;
+
+    // 1. Check LRU cache (never serve stale deterministic fallbacks from cache)
+    const cached = this.explanationCache.get(cacheKey);
+    if (cached && cached.analysisMode !== 'deterministic') {
+      this.metrics.explanationHits++;
+      this.metrics.aiCallsAvoided++;
+      logger.info('Returning file explanation from cache', {
+        sessionId,
+        filePath: actualPath,
+        contentHash: contentHash.substring(0, 8),
+      });
+      return {
+        ...this.cloneFileExplanation(cached),
+        analysisMode: 'cached',
+      };
+    }
+
+    this.metrics.explanationMisses++;
+
     const language = detectLanguage(actualPath);
     const deterministic = this.extractDeterministicFileInfo(actualPath, fileContent, language);
+    deterministic.analysisMode = 'deterministic';
 
     try {
       const truncated =
@@ -767,7 +918,12 @@ export class AnalysisService {
       const rawResponse = await openaiService.generateCompletion(
         prompt,
         'You are an expert code reviewer. Return strict JSON only.',
-        { temperature: 0.1, maxTokens: 1600 }
+        {
+          temperature: 0.1,
+          maxTokens: 3200,
+          responseFormat: { type: 'json_object' },
+          reasoningEffort: 'low',
+        }
       );
 
       const parsed = this.parseFileExplanation(rawResponse, actualPath, deterministic);
@@ -776,16 +932,27 @@ export class AnalysisService {
         filePath: actualPath,
         functionsCount: parsed.keyFunctions.length,
         complexity: parsed.complexity,
+        analysisMode: parsed.analysisMode,
       });
 
-      return parsed;
+      // Cache ONLY verified AI-enriched explanations
+      if (parsed.analysisMode === 'ai-enriched') {
+        this.explanationCache.set(cacheKey, parsed);
+      }
+      return this.cloneFileExplanation(parsed);
     } catch (error) {
-      logger.warn('AI file explanation generation error, using deterministic analysis', {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      logger.warn('AI file explanation generation failed, returning deterministic fallback (uncached)', {
         sessionId,
         filePath: actualPath,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: errMsg,
       });
-      return deterministic;
+      // Do NOT cache failed/unparseable AI requests
+      return {
+        ...this.cloneFileExplanation(deterministic),
+        analysisMode: 'deterministic',
+        fallbackReason: errMsg.substring(0, 140),
+      };
     }
   }
 
@@ -885,56 +1052,89 @@ export class AnalysisService {
   }
 
   private parseOverview(raw: string, fallback: ArchitectureOverview): ArchitectureOverview {
-    try {
-      const json = this.extractJson(raw);
-      const parsed = JSON.parse(json) as Partial<ArchitectureOverview> & {
-        keyModules?: Partial<KeyModule>[];
-        risks?: Partial<AnalysisRisk>[];
-      };
+    const json = this.extractJson(raw);
+    const parsed = JSON.parse(json) as Partial<ArchitectureOverview> & {
+      keyModules?: Partial<KeyModule>[];
+      risks?: Partial<AnalysisRisk>[];
+    };
 
-      const keyModules = (parsed.keyModules || [])
-        .filter((m) => m && (m.name || m.path || m.responsibility))
-        .map((m) => ({
-          name: (m.name || 'Module').trim(),
-          path: (m.path || 'unknown').trim(),
-          responsibility: (m.responsibility || 'Responsibility not specified').trim(),
-          dependencies: Array.isArray(m.dependencies) ? m.dependencies.map(String) : [],
-        }));
-
-      const risks = (parsed.risks || [])
-        .filter((r) => r && (r.title || r.detail))
-        .map((r) => {
-          const severity = String(r.severity || 'medium').toLowerCase();
-          return {
-            title: (r.title || 'Risk').trim(),
-            severity: severity === 'high' || severity === 'medium' || severity === 'low'
-              ? severity
-              : 'medium',
-            detail: (r.detail || 'No details provided').trim(),
-            mitigation: (r.mitigation || 'No mitigation provided').trim(),
-            percentage: typeof r.percentage === 'number' ? r.percentage : 50,
-            category: r.category || 'Maintainability',
-            status: 'INFERRED RISK',
-            confidence: 80,
-          } as AnalysisRisk;
-        });
-
-      return {
-        ...fallback,
-        summary: String(parsed.summary || fallback.summary).trim(),
-        pattern: String(parsed.pattern || fallback.pattern).trim(),
-        techStack: Array.isArray(parsed.techStack) && parsed.techStack.length > 0 ? parsed.techStack : fallback.techStack,
-        keyModules: keyModules.length > 0 ? keyModules : fallback.keyModules,
-        risks: risks.length > 0 ? risks : fallback.risks,
-        dataFlow: String(parsed.dataFlow || fallback.dataFlow).trim(),
-        confidence: Number(parsed.confidence) || fallback.confidence,
-        executiveBullets: Array.isArray(parsed.executiveBullets) && parsed.executiveBullets.length > 0
-          ? parsed.executiveBullets
-          : fallback.executiveBullets,
-      };
-    } catch {
-      return fallback;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('AI overview response JSON is not an object');
     }
+
+    const hasCoreFields =
+      (typeof parsed.summary === 'string' && parsed.summary.trim().length > 0) ||
+      (typeof parsed.pattern === 'string' && parsed.pattern.trim().length > 0) ||
+      (Array.isArray(parsed.keyModules) && parsed.keyModules.length > 0);
+    if (!hasCoreFields) {
+      throw new Error('AI overview response JSON missing required architectural fields');
+    }
+
+    const keyModules = (parsed.keyModules || [])
+      .filter((m) => m && (m.name || m.path || m.responsibility))
+      .map((m) => ({
+        name: (m.name || 'Module').trim(),
+        path: (m.path || 'unknown').trim(),
+        responsibility: (m.responsibility || 'Responsibility not specified').trim(),
+        dependencies: Array.isArray(m.dependencies) ? m.dependencies.map(String) : [],
+      }));
+
+    const risks = (parsed.risks || [])
+      .filter((r) => r && (r.title || r.detail))
+      .map((r) => {
+        const severity = String(r.severity || 'medium').toLowerCase();
+        const filePath = typeof r.filePath === 'string' && r.filePath.trim().length > 0 ? r.filePath.trim() : undefined;
+        const sourceReferences = Array.isArray(r.sourceReferences) && r.sourceReferences.length > 0
+          ? r.sourceReferences
+          : (filePath ? [{ filePath, label: 'AI referenced file' }] : []);
+        const hasSourceRefs = sourceReferences.length > 0;
+        const mappedSeverity = severity === 'high' || severity === 'medium' || severity === 'low'
+          ? (severity === 'high' && !hasSourceRefs ? 'medium' : severity)
+          : 'medium';
+        return {
+          title: (r.title || 'Risk').trim(),
+          severity: mappedSeverity,
+          detail: (r.detail || 'No details provided').trim(),
+          mitigation: (r.mitigation || 'No mitigation provided').trim(),
+          percentage: typeof r.percentage === 'number' ? r.percentage : 50,
+          category: r.category || 'Maintainability',
+          status: 'INFERRED',
+          classification: 'INFERRED',
+          detectionMethod: 'ai-architecture-review',
+          confidence: filePath ? 70 : 60,
+          provenance: 'first-party',
+          filePath,
+          sourceReferences,
+        } as AnalysisRisk;
+      });
+
+    const mergedTechStack = (() => {
+      const base = Array.isArray(fallback.techStack) ? fallback.techStack : [];
+      if (!Array.isArray(parsed.techStack) || parsed.techStack.length === 0) return base;
+      const aiItems = parsed.techStack
+        .map(String)
+        .filter((item) => {
+          if (fallback.primaryEcosystem === 'python' && /^node(\.js)?$/i.test(item.trim())) {
+            return false;
+          }
+          return Boolean(item.trim());
+        });
+      return Array.from(new Set([...base, ...aiItems]));
+    })();
+
+    return {
+      ...fallback,
+      summary: String(parsed.summary || fallback.summary).trim(),
+      pattern: String(parsed.pattern || fallback.pattern).trim(),
+      techStack: mergedTechStack,
+      keyModules: keyModules.length > 0 ? keyModules : fallback.keyModules,
+      risks: risks.length > 0 ? risks : fallback.risks,
+      dataFlow: String(parsed.dataFlow || fallback.dataFlow).trim(),
+      confidence: Number(parsed.confidence) || fallback.confidence,
+      executiveBullets: Array.isArray(parsed.executiveBullets) && parsed.executiveBullets.length > 0
+        ? parsed.executiveBullets
+        : fallback.executiveBullets,
+    };
   }
 
   private inferTechStack(files: Map<string, string>, metadata: RepoMetadata): string[] {
@@ -967,8 +1167,9 @@ export class AnalysisService {
       /(^|\/)src\/app\./i,
       /(^|\/)main\.(ts|tsx|js|jsx|py|go|rs|java)$/i,
       /(^|\/)index\.(ts|tsx|js|jsx|py|go|rs|java)$/i,
-      /(^|\/)server\.(ts|js)$/i,
+      /(^|\/)server\.(ts|js|py)$/i,
       /(^|\/)app\.(ts|tsx|js|jsx|py)$/i,
+      /(^|\/)(cli|wsgi|asgi|manage|__main__)\.(ts|js|py)$/i,
       /(^|\/)cmd\//i,
       /(^|\/)routes?\//i,
     ];
@@ -1052,40 +1253,46 @@ export class AnalysisService {
     filePath: string,
     fallback: FileExplanation
   ): FileExplanation {
-    try {
-      const json = this.extractJson(raw);
-      const parsed = JSON.parse(json) as Partial<FileExplanation>;
+    const json = this.extractJson(raw);
+    const parsed = JSON.parse(json) as Partial<FileExplanation>;
 
-      const complexityRaw = String(parsed.complexity || '').toLowerCase();
-      const complexity =
-        complexityRaw === 'low' || complexityRaw === 'medium' || complexityRaw === 'high'
-          ? complexityRaw
-          : fallback.complexity;
-
-      const keyFunctions =
-        Array.isArray(parsed.keyFunctions) && parsed.keyFunctions.length > 0
-          ? parsed.keyFunctions.map((fn) => ({
-              name: String(fn.name || 'anonymous').trim(),
-              lineStart: Number(fn.lineStart) || 1,
-              lineEnd: Number(fn.lineEnd) || 1,
-              description: String(fn.description || 'No description provided').trim(),
-              parameters: Array.isArray(fn.parameters) ? fn.parameters.map(String) : [],
-              returns: String(fn.returns || 'void').trim(),
-            }))
-          : fallback.keyFunctions;
-
-      return {
-        filePath,
-        purpose: String(parsed.purpose || fallback.purpose).trim(),
-        keyFunctions,
-        dependencies: Array.isArray(parsed.dependencies) ? parsed.dependencies.map(String) : fallback.dependencies,
-        exports: Array.isArray(parsed.exports) ? parsed.exports.map(String) : fallback.exports,
-        patterns: Array.isArray(parsed.patterns) ? parsed.patterns.map(String) : fallback.patterns,
-        complexity,
-      };
-    } catch {
-      return fallback;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('AI file explanation JSON is not an object');
     }
+
+    const purpose = typeof parsed.purpose === 'string' ? parsed.purpose.trim() : '';
+    if (!purpose) {
+      throw new Error('AI file explanation JSON missing required purpose field');
+    }
+
+    const complexityRaw = String(parsed.complexity || '').toLowerCase();
+    const complexity =
+      complexityRaw === 'low' || complexityRaw === 'medium' || complexityRaw === 'high'
+        ? complexityRaw
+        : fallback.complexity;
+
+    const keyFunctions =
+      Array.isArray(parsed.keyFunctions) && parsed.keyFunctions.length > 0
+        ? parsed.keyFunctions.map((fn) => ({
+            name: String(fn.name || 'anonymous').trim(),
+            lineStart: Number(fn.lineStart) || 1,
+            lineEnd: Number(fn.lineEnd) || 1,
+            description: String(fn.description || 'No description provided').trim(),
+            parameters: Array.isArray(fn.parameters) ? fn.parameters.map(String) : [],
+            returns: String(fn.returns || 'void').trim(),
+          }))
+        : fallback.keyFunctions;
+
+    return {
+      filePath,
+      purpose,
+      keyFunctions,
+      dependencies: Array.isArray(parsed.dependencies) ? parsed.dependencies.map(String) : fallback.dependencies,
+      exports: Array.isArray(parsed.exports) ? parsed.exports.map(String) : fallback.exports,
+      patterns: Array.isArray(parsed.patterns) ? parsed.patterns.map(String) : fallback.patterns,
+      complexity,
+      analysisMode: 'ai-enriched',
+    };
   }
 
   async detectBugs(sessionId: string, filePath?: string): Promise<Bug[]> {
@@ -1190,15 +1397,39 @@ export class AnalysisService {
   /**
    * Extract comprehensive, deterministic Dependency Graph representing real file-to-file
    * relationships, import declarations, exports, and architectural classifications.
+   * Cached against repository content fingerprint with defensive copying.
    */
   public extractDependencyGraph(sessionId: string): DependencyGraphData | null {
     const session = sessionService.getSession(sessionId);
     if (!session) return null;
 
+    const fingerprint = this.computeFingerprint(session);
+
+    // 1. Check cache
+    const cached = this.dependencyGraphCache.get(fingerprint);
+    if (cached) {
+      this.metrics.graphHits++;
+      logger.info('Returning dependency graph from cache', { sessionId, fingerprint });
+      return this.cloneDependencyGraph(cached);
+    }
+
+    this.metrics.graphMisses++;
+
+    // 2. Compute graph
+    const graph = this.computeDependencyGraph(session);
+    if (graph) {
+      this.dependencyGraphCache.set(fingerprint, graph);
+      return this.cloneDependencyGraph(graph);
+    }
+
+    return null;
+  }
+
+  private computeDependencyGraph(session: SessionData): DependencyGraphData {
     const files = session.files;
     const detectedEntryPoints = this.inferEntryPoints(files);
 
-    // 1. Helper to resolve relative and alias imports to a real repository file path
+    // 1. Helper to resolve relative and JS/TS alias imports to a real repository file path
     const resolveImportPath = (currentFilePath: string, importSpecifier: string): string | null => {
       if (!importSpecifier || importSpecifier.startsWith('node:') || (!importSpecifier.startsWith('.') && !importSpecifier.startsWith('@/'))) {
         return null;
@@ -1239,7 +1470,7 @@ export class AnalysisService {
 
       // Primary entry points
       if (
-        /^(server|index|app|main|express)\.(ts|js|py|go)$/.test(base) ||
+        /^(server|index|app|main|express|wsgi|asgi|manage|__main__)\.(ts|js|py|go)$/.test(base) ||
         lower === 'src/index.ts' ||
         lower === 'src/main.ts' ||
         lower === 'src/server.ts' ||
@@ -1251,7 +1482,7 @@ export class AnalysisService {
         return 'entry';
       }
       // Routes & API endpoints
-      if (lower.includes('routes') || lower.includes('route.') || lower.includes('router') || lower.includes('/api/')) {
+      if (lower.includes('routes') || lower.includes('route.') || lower.includes('router') || lower.includes('blueprint') || lower.includes('/api/')) {
         return 'route';
       }
       // Controllers & Handlers
@@ -1271,11 +1502,20 @@ export class AnalysisService {
         return 'component';
       }
       // Storage & Models
-      if (lower.includes('model') || lower.includes('db') || lower.includes('store') || lower.includes('entity') || lower.includes('repository') || lower.includes('storage')) {
+      if (lower.includes('model') || lower.includes('db') || lower.includes('store') || lower.includes('entity') || lower.includes('repository') || lower.includes('storage') || lower.includes('session')) {
         return 'storage';
       }
-      // Configuration
-      if (lower.endsWith('.config.js') || lower.endsWith('.config.ts') || lower.endsWith('.json') || lower.includes('config') || lower.includes('.env')) {
+      // Configuration & Manifests
+      if (
+        lower.endsWith('.config.js') ||
+        lower.endsWith('.config.ts') ||
+        lower.endsWith('.json') ||
+        lower.endsWith('.toml') ||
+        base === 'setup.cfg' ||
+        base.startsWith('requirements') ||
+        lower.includes('config') ||
+        lower.includes('.env')
+      ) {
         return 'config';
       }
       if (detectedEntryPoints.includes(filePath)) {
@@ -1284,8 +1524,8 @@ export class AnalysisService {
       return 'utility';
     };
 
-    // 3. Extract exports
-    const extractExports = (content: string): string[] => {
+    // 3. Extract exports (JS/TS)
+    const extractJsExports = (content: string): string[] => {
       const exports: string[] = [];
       const jsExportRegex = /(?:export\s+(?:default\s+)?(?:class|function|const|let|var|type|interface)\s+([A-Za-z0-9_$]+)|module\.exports\s*=\s*([A-Za-z0-9_$]+)|exports\.([A-Za-z0-9_$]+)\s*=)/g;
       let m: RegExpExecArray | null;
@@ -1293,15 +1533,11 @@ export class AnalysisService {
         const name = m[1] || m[2] || m[3];
         if (name && !exports.includes(name)) exports.push(name);
       }
-      const pyExportRegex = /^(?:def|class)\s+([A-Za-z0-9_$]+)/gm;
-      while ((m = pyExportRegex.exec(content)) !== null) {
-        if (m[1] && !exports.includes(m[1]) && !m[1].startsWith('_')) exports.push(m[1]);
-      }
       return exports.slice(0, 8);
     };
 
-    // 4. Extract imports
-    const extractImports = (content: string): string[] => {
+    // 4. Extract imports (JS/TS)
+    const extractJsImports = (content: string): string[] => {
       const imports: string[] = [];
       const jsRegex = /(?:import\s+(?:(?:\{[^}]+\}|\*\s+as\s+\w+|\w+)(?:\s*,\s*(?:\{[^}]+\}|\*\s+as\s+\w+|\w+))*\s+from\s+)?['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))/g;
       let m: RegExpExecArray | null;
@@ -1309,18 +1545,29 @@ export class AnalysisService {
         const spec = m[1] || m[2];
         if (spec && !imports.includes(spec)) imports.push(spec);
       }
-      const pyRegex = /(?:from\s+([A-Za-z0-9_.]+)\s+import|import\s+([A-Za-z0-9_.]+))/g;
-      while ((m = pyRegex.exec(content)) !== null) {
-        const spec = m[1] || m[2];
-        if (spec && !imports.includes(spec)) imports.push(spec);
-      }
       return imports;
     };
 
-    // 5. Build nodes
-    const nodeMap = new Map<string, DependencyGraphNode>();
+    // 5. Partition active graph nodes and prepare batch Python AST parsing
+    const includedEntries: Array<[string, string]> = [];
+    const includedNormalizedFiles = new Set<string>();
+    const pythonFilesToParse = new Map<string, string>();
+    const normalizedToOriginalPath = new Map<string, string>();
+
     for (const [filePath, content] of files.entries()) {
       const lower = filePath.toLowerCase();
+      if (pythonDependencyService.isPythonFile(filePath)) {
+        if (pythonDependencyService.isExcludedPythonTestOrBuildFile(filePath)) {
+          continue;
+        }
+        const normPath = pythonDependencyService.normalizePath(filePath);
+        includedEntries.push([filePath, content]);
+        includedNormalizedFiles.add(normPath);
+        normalizedToOriginalPath.set(normPath, filePath);
+        pythonFilesToParse.set(normPath, content);
+        continue;
+      }
+
       if (
         lower.endsWith('.md') ||
         lower.endsWith('.png') ||
@@ -1335,17 +1582,67 @@ export class AnalysisService {
       ) {
         continue;
       }
+      includedEntries.push([filePath, content]);
+      const normPath = pythonDependencyService.normalizePath(filePath);
+      includedNormalizedFiles.add(normPath);
+      normalizedToOriginalPath.set(normPath, filePath);
+    }
 
+    const { parsedFiles: parsedPythonFiles, runtimeStdlib } = pythonDependencyService.parsePythonFiles(pythonFilesToParse);
+    const pyIndex = pythonDependencyService.buildRepoIndex(files, includedNormalizedFiles, runtimeStdlib);
+
+    let pythonFilesScanned = 0;
+    let importStatementsExtracted = 0;
+    let internalDependenciesResolved = 0;
+    const allExternalDependencies = new Set<string>();
+    const allStdlibImports = new Set<string>();
+    const allUnresolvedImports: UnresolvedImportEntry[] = [];
+    const allAmbiguousResolutions: AmbiguousResolutionEntry[] = [];
+
+    // 6. Build nodes
+    const nodeMap = new Map<string, DependencyGraphNode>();
+    for (const [filePath, content] of includedEntries) {
       const lineCount = content.split('\n').length;
       const nodeType = classifyNodeType(filePath, content);
-      const rawImports = extractImports(content);
-      const exports = extractExports(content);
+      let rawImports: string[] = [];
+      let resolvedImports: string[] = [];
+      let exports: string[] = [];
+      let externalImports: string[] | undefined;
+      let stdlibImports: string[] | undefined;
+      let unresolvedNodeImports: string[] | undefined;
 
-      const resolvedImports: string[] = [];
-      for (const spec of rawImports) {
-        const resolved = resolveImportPath(filePath, spec);
-        if (resolved && resolved !== filePath && !resolvedImports.includes(resolved)) {
-          resolvedImports.push(resolved);
+      if (pythonDependencyService.isPythonFile(filePath)) {
+        pythonFilesScanned++;
+        const normPath = pythonDependencyService.normalizePath(filePath);
+        const parsedPy = parsedPythonFiles.get(normPath) || pythonDependencyService.parsePythonSourceFallback(content);
+        const pyResolved = pythonDependencyService.resolveFileDependencies(normPath, parsedPy, pyIndex);
+
+        importStatementsExtracted += pyResolved.statementsExtracted;
+        rawImports = pyResolved.rawImports;
+        resolvedImports = pyResolved.resolvedInternal
+          .map((normTarget) => normalizedToOriginalPath.get(normTarget) || normTarget)
+          .filter((target) => target !== filePath);
+        exports = pyResolved.exports;
+
+        internalDependenciesResolved += resolvedImports.length;
+        for (const ext of pyResolved.externalImports) allExternalDependencies.add(ext);
+        for (const std of pyResolved.stdlibImports) allStdlibImports.add(std);
+        for (const unres of pyResolved.unresolvedImports) allUnresolvedImports.push(unres);
+        for (const amb of pyResolved.ambiguousResolutions) allAmbiguousResolutions.push(amb);
+
+        if (pyResolved.externalImports.length > 0) externalImports = pyResolved.externalImports;
+        if (pyResolved.stdlibImports.length > 0) stdlibImports = pyResolved.stdlibImports;
+        if (pyResolved.unresolvedImports.length > 0) {
+          unresolvedNodeImports = pyResolved.unresolvedImports.map((u) => u.specifier);
+        }
+      } else {
+        rawImports = extractJsImports(content);
+        exports = extractJsExports(content);
+        for (const spec of rawImports) {
+          const resolved = resolveImportPath(filePath, spec);
+          if (resolved && resolved !== filePath && !resolvedImports.includes(resolved)) {
+            resolvedImports.push(resolved);
+          }
         }
       }
 
@@ -1364,7 +1661,7 @@ export class AnalysisService {
         utility: 'Utilities & Helpers',
       };
 
-      nodeMap.set(filePath, {
+      const nodeObj: DependencyGraphNode = {
         id: filePath,
         label: baseName,
         path: filePath,
@@ -1377,19 +1674,29 @@ export class AnalysisService {
         exports,
         loc: lineCount,
         status: 'confirmed',
-      });
+      };
+      if (externalImports) nodeObj.externalImports = externalImports;
+      if (stdlibImports) nodeObj.stdlibImports = stdlibImports;
+      if (unresolvedNodeImports) nodeObj.unresolvedImports = unresolvedNodeImports;
+
+      nodeMap.set(filePath, nodeObj);
     }
 
-    // 6. Connect edges and calculate importedBy
+    // 7. Connect edges, calculate importedBy, and detect cycles
     const edges: DependencyGraphEdge[] = [];
     const edgeSet = new Set<string>();
+    const adjacency = new Map<string, string[]>();
 
     for (const [sourcePath, node] of nodeMap.entries()) {
+      const uniqueTargets: string[] = [];
       for (const targetPath of node.resolvedImports) {
         const targetNode = nodeMap.get(targetPath);
         if (targetNode) {
           if (!targetNode.importedBy.includes(sourcePath)) {
             targetNode.importedBy.push(sourcePath);
+          }
+          if (!uniqueTargets.includes(targetPath)) {
+            uniqueTargets.push(targetPath);
           }
           const edgeId = `e-${sourcePath}->${targetPath}`;
           if (!edgeSet.has(edgeId)) {
@@ -1404,14 +1711,16 @@ export class AnalysisService {
           }
         }
       }
+      adjacency.set(sourcePath, uniqueTargets);
     }
 
+    const circularDependencies = pythonDependencyService.detectCircularDependencies(adjacency);
     const nodes = Array.from(nodeMap.values());
     const entryPoints = nodes.filter((n) => n.type === 'entry').map((n) => n.id);
     const isolatedNodes = nodes.filter((n) => n.resolvedImports.length === 0 && n.importedBy.length === 0).length;
     const density = nodes.length > 1 ? Number((edges.length / (nodes.length * (nodes.length - 1))).toFixed(4)) : 0;
 
-    return {
+    const graphData: DependencyGraphData = {
       nodes,
       edges,
       summary: {
@@ -1421,6 +1730,230 @@ export class AnalysisService {
         isolatedNodes,
         density,
       },
+    };
+
+    if (circularDependencies.length > 0) {
+      graphData.circularDependencies = circularDependencies;
+    }
+
+    if (pythonFilesScanned > 0 || pyIndex.manifestsDetected.length > 0) {
+      graphData.diagnostics = {
+        pythonFilesScanned,
+        importStatementsExtracted,
+        internalDependenciesResolved,
+        externalDependencies: Array.from(allExternalDependencies).sort(),
+        stdlibImports: Array.from(allStdlibImports).sort(),
+        unresolvedImports: allUnresolvedImports,
+        circularDependencies,
+        ambiguousResolutions: allAmbiguousResolutions,
+        manifestsDetected: pyIndex.manifestsDetected,
+      };
+    }
+
+    return graphData;
+  }
+
+  public invalidateDependencyGraph(fingerprint?: string): void {
+    if (fingerprint) {
+      this.dependencyGraphCache.delete(fingerprint);
+    } else {
+      this.dependencyGraphCache.clear();
+    }
+  }
+
+  /**
+   * Explicitly invalidate cached overview and dependency graph for a fingerprint,
+   * removing from both memory LRU caches and disk cache.
+   */
+  public invalidateCache(fingerprint: string): void {
+    if (!fingerprint) return;
+    this.canonicalCache.delete(fingerprint);
+    this.dependencyGraphCache.delete(fingerprint);
+    try {
+      const diskPath = this.getCacheFilePath(fingerprint);
+      if (fs.existsSync(diskPath)) {
+        fs.unlinkSync(diskPath);
+      }
+    } catch (err) {
+      logger.warn('Failed to delete cache file from disk', { fingerprint, err });
+    }
+    // Also invalidate session-level cached overviews across all matching active sessions
+    sessionService.invalidateSessionOverviews(fingerprint);
+    logger.info('Invalidated cache for fingerprint', { fingerprint });
+  }
+
+  public getMetrics(): CacheMetrics {
+    return { ...this.metrics };
+  }
+
+  public resetMetrics(): void {
+    this.metrics = {
+      explanationHits: 0,
+      explanationMisses: 0,
+      explanationEvictions: 0,
+      overviewHits: 0,
+      overviewMisses: 0,
+      overviewEvictions: 0,
+      graphHits: 0,
+      graphMisses: 0,
+      graphEvictions: 0,
+      inFlightOverviewReused: 0,
+      aiCallsAvoided: 0,
+    };
+  }
+
+  public clearCaches(): void {
+    this.explanationCache.clear();
+    this.canonicalCache.clear();
+    this.dependencyGraphCache.clear();
+    this.inFlightOverviews.clear();
+
+    // Clean disk cache files to ensure a completely cold cache when requested
+    try {
+      const cacheDir = path.join(config.sessionsDir, 'cache');
+      if (fs.existsSync(cacheDir)) {
+        const files = fs.readdirSync(cacheDir);
+        for (const file of files) {
+          if (file.startsWith('canonical-') && file.endsWith('.json')) {
+            try {
+              fs.unlinkSync(path.join(cacheDir, file));
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
+
+  /**
+   * Invalidate and purge all session-scoped cached entries (e.g. file explanations)
+   * when a session is deleted or expires.
+   */
+  public invalidateSession(sessionId: string): number {
+    const prefix = `${sessionId}:`;
+    let count = 0;
+    for (const key of this.explanationCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.explanationCache.delete(key);
+        count++;
+      }
+    }
+    if (count > 0) {
+      logger.info('Purged session-scoped explanation cache entries', { sessionId, count });
+    }
+    return count;
+  }
+
+  private cloneFileExplanation(explanation: FileExplanation): FileExplanation {
+    return {
+      ...explanation,
+      keyFunctions: explanation.keyFunctions.map((fn) => ({
+        ...fn,
+        parameters: Array.isArray(fn.parameters) ? [...fn.parameters] : [],
+      })),
+      dependencies: Array.isArray(explanation.dependencies) ? [...explanation.dependencies] : [],
+      exports: Array.isArray(explanation.exports) ? [...explanation.exports] : [],
+      patterns: Array.isArray(explanation.patterns) ? [...explanation.patterns] : [],
+    };
+  }
+
+  private cloneDependencyGraph(data: DependencyGraphData): DependencyGraphData {
+    const cloned: DependencyGraphData = {
+      nodes: data.nodes.map((node) => ({
+        ...node,
+        imports: [...node.imports],
+        resolvedImports: [...node.resolvedImports],
+        importedBy: [...node.importedBy],
+        exports: [...node.exports],
+        ...(node.externalImports ? { externalImports: [...node.externalImports] } : {}),
+        ...(node.stdlibImports ? { stdlibImports: [...node.stdlibImports] } : {}),
+        ...(node.unresolvedImports ? { unresolvedImports: [...node.unresolvedImports] } : {}),
+      })),
+      edges: data.edges.map((edge) => ({ ...edge })),
+      summary: {
+        ...data.summary,
+        entryPoints: [...data.summary.entryPoints],
+      },
+    };
+    if (data.circularDependencies) {
+      cloned.circularDependencies = data.circularDependencies.map((cycle) => [...cycle]);
+    }
+    if (data.diagnostics) {
+      cloned.diagnostics = {
+        ...data.diagnostics,
+        externalDependencies: [...data.diagnostics.externalDependencies],
+        stdlibImports: [...data.diagnostics.stdlibImports],
+        unresolvedImports: data.diagnostics.unresolvedImports.map((u) => ({ ...u })),
+        circularDependencies: data.diagnostics.circularDependencies.map((c) => [...c]),
+        ambiguousResolutions: data.diagnostics.ambiguousResolutions.map((a) => ({
+          ...a,
+          candidates: [...a.candidates],
+        })),
+        manifestsDetected: [...data.diagnostics.manifestsDetected],
+      };
+    }
+    return cloned;
+  }
+
+  private cloneOverview(overview: ArchitectureOverview): ArchitectureOverview {
+    return {
+      ...overview,
+      techStack: Array.isArray(overview.techStack) ? [...overview.techStack] : [],
+      detectedEntryPoints: Array.isArray(overview.detectedEntryPoints) ? [...overview.detectedEntryPoints] : [],
+      integrationPoints: Array.isArray(overview.integrationPoints) ? [...overview.integrationPoints] : [],
+      unknowns: Array.isArray(overview.unknowns) ? [...overview.unknowns] : [],
+      executiveBullets: Array.isArray(overview.executiveBullets) ? [...overview.executiveBullets] : [],
+      keyModules: Array.isArray(overview.keyModules)
+        ? overview.keyModules.map((m) => ({
+            ...m,
+            dependencies: Array.isArray(m.dependencies) ? [...m.dependencies] : [],
+            ...(Array.isArray(m.keyFunctions) ? { keyFunctions: [...m.keyFunctions] } : {}),
+          }))
+        : [],
+      risks: Array.isArray(overview.risks)
+        ? overview.risks.map((r) => ({
+            ...r,
+            ...(Array.isArray(r.sourceReferences)
+              ? { sourceReferences: r.sourceReferences.map((sr) => ({ ...sr })) }
+              : {}),
+            ...(r.provenance ? { provenance: r.provenance } : {}),
+            ...(r.bundledPackageName ? { bundledPackageName: r.bundledPackageName } : {}),
+          }))
+        : [],
+      evidence: Array.isArray(overview.evidence) ? overview.evidence.map((e) => ({ ...e })) : [],
+      scorecard: overview.scorecard ? { ...overview.scorecard } : overview.scorecard,
+      deepDive: overview.deepDive ? { ...overview.deepDive } : overview.deepDive,
+      executionFlow: Array.isArray(overview.executionFlow)
+        ? overview.executionFlow.map((s) => ({
+            ...s,
+            files: Array.isArray(s.files) ? [...s.files] : [],
+            ...(Array.isArray(s.symbols) ? { symbols: [...s.symbols] } : {}),
+          }))
+        : undefined,
+      dataFlowStages: Array.isArray(overview.dataFlowStages)
+        ? overview.dataFlowStages.map((d) => ({
+            ...d,
+            files: Array.isArray(d.files) ? [...d.files] : [],
+            ...(Array.isArray(d.symbols) ? { symbols: [...d.symbols] } : {}),
+          }))
+        : undefined,
+      ...(Array.isArray(overview.analysisLimitations)
+        ? { analysisLimitations: [...overview.analysisLimitations] }
+        : {}),
+      architectureLayers: Array.isArray(overview.architectureLayers)
+        ? overview.architectureLayers.map((l) => ({
+            ...l,
+            modules: Array.isArray(l.modules) ? [...l.modules] : [],
+            files: Array.isArray(l.files) ? [...l.files] : [],
+          }))
+        : undefined,
+      detectedTechnologies: Array.isArray(overview.detectedTechnologies)
+        ? overview.detectedTechnologies.map((t) => ({
+            ...t,
+            evidenceSources: [...t.evidenceSources],
+            evidence: t.evidence.map((e) => ({ ...e })),
+          }))
+        : undefined,
+      codeMetrics: overview.codeMetrics ? JSON.parse(JSON.stringify(overview.codeMetrics)) : undefined,
     };
   }
 }

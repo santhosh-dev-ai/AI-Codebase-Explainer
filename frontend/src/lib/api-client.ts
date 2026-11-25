@@ -2,6 +2,25 @@ import axios, { AxiosInstance, AxiosError } from 'axios';
 import { API_BASE_URL } from '@/constants/config';
 import type { ApiResponse } from '@/types/api.types';
 
+export function getSessionToken(sessionId: string): string | null {
+  if (typeof window === 'undefined') return null;
+  return sessionStorage.getItem(`session_token_${sessionId}`);
+}
+
+export function setSessionToken(sessionId: string, token: string): void {
+  if (typeof window === 'undefined') return;
+  sessionStorage.setItem(`session_token_${sessionId}`, token);
+}
+
+export function clearSessionToken(sessionId: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    sessionStorage.removeItem(`session_token_${sessionId}`);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 class ApiClient {
   private client: AxiosInstance;
 
@@ -9,6 +28,7 @@ class ApiClient {
     this.client = axios.create({
       baseURL: API_BASE_URL,
       timeout: 60000, // 60 seconds
+      withCredentials: true,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -21,7 +41,18 @@ class ApiClient {
     // Request interceptor
     this.client.interceptors.request.use(
       (config) => {
-        // Add any request modifications here (e.g., auth tokens)
+        // Extract sessionId from URL if present and attach session authorization tokens
+        if (config.url) {
+          const sessionMatch = config.url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+          if (sessionMatch) {
+            const sessionId = sessionMatch[0];
+            const token = getSessionToken(sessionId);
+            if (token) {
+              config.headers['X-Session-Token'] = token;
+              config.headers['Authorization'] = `Bearer ${token}`;
+            }
+          }
+        }
         return config;
       },
       (error) => {
@@ -36,7 +67,12 @@ class ApiClient {
       },
       (error: AxiosError<ApiResponse<never>>) => {
         const errorMessage = this.handleError(error);
-        return Promise.reject(new Error(errorMessage));
+        const err: any = new Error(errorMessage);
+        if (error.response?.status) {
+          err.statusCode = error.response.status;
+          err.status = error.response.status;
+        }
+        return Promise.reject(err);
       }
     );
   }

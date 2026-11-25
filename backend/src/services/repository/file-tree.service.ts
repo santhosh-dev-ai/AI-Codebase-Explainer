@@ -1,5 +1,6 @@
 import path from 'path';
 import { FileNode, RepoMetadata } from '../../types/repository.types';
+import { codeMetricsService } from '../analysis/code-metrics.service';
 import {
   shouldExcludeFile,
   shouldExcludeDirectory,
@@ -75,7 +76,11 @@ export class FileTreeService {
     }
   }
 
-  generateMetadata(files: Map<string, string>, fallbackName?: string): RepoMetadata {
+  generateMetadata(
+    files: Map<string, string>,
+    fallbackName?: string,
+    samplingInfo?: { rawTotalFiles: number; isSampled: boolean }
+  ): RepoMetadata {
     logger.info('Generating repository metadata');
 
     const languages: Record<string, number> = {};
@@ -83,6 +88,12 @@ export class FileTreeService {
     let totalSize = 0;
     let maxDepth = 0;
     let totalFiles = 0;
+
+    let totalLines = 0;
+    let codeLines = 0;
+    let blankLines = 0;
+    let commentLines = 0;
+    let mixedLines = 0;
 
     for (const [filePath, content] of files.entries()) {
       const size = Buffer.byteLength(content, 'utf8');
@@ -94,6 +105,14 @@ export class FileTreeService {
 
       totalFiles++;
       totalSize += size;
+
+      // Track accurate language-aware lines
+      const lineStats = codeMetricsService.analyzeFileLines(filePath, content);
+      totalLines += lineStats.totalLines;
+      codeLines += lineStats.codeLines;
+      blankLines += lineStats.blankLines;
+      commentLines += lineStats.commentLines;
+      mixedLines += lineStats.mixedLines;
 
       // Track language
       const language = detectLanguage(filePath);
@@ -125,6 +144,17 @@ export class FileTreeService {
       languages,
       fileTypes,
       depth: maxDepth,
+      metrics: {
+        totalLines,
+        codeLines,
+        blankLines,
+        commentLines,
+        mixedLines,
+        provenance: 'measured',
+      },
+      rawTotalFiles: samplingInfo?.rawTotalFiles ?? totalFiles,
+      analyzedFiles: totalFiles,
+      isSampled: samplingInfo?.isSampled ?? false,
     };
 
     logger.info('Metadata generated', metadata);

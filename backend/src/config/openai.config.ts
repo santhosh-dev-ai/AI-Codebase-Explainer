@@ -2,13 +2,14 @@ import OpenAI from 'openai';
 import config from './env.config';
 
 // Configure AI client based on provider
+// Set maxRetries to 0 to prevent nested SDK retries and allow centralized application-level retry handling
 export const openai = new OpenAI({
   apiKey: config.aiApiKey,
   baseURL: config.aiProvider === 'groq'
     ? 'https://api.groq.com/openai/v1'
     : 'https://api.openai.com/v1',
   timeout: 60000,
-  maxRetries: 2,
+  maxRetries: 0,
 });
 
 // Model configuration based on provider
@@ -44,4 +45,6 @@ export const AI_CONFIG = {
   streamingChunkSize: 50,
   retryAttempts: 3,
   retryDelay: 1000,
+  maxRetryWaitMs: 15000,
+  totalRetryDeadlineMs: 30000,
 } as const;

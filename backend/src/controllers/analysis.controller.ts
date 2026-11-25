@@ -104,6 +104,35 @@ export class AnalysisController {
       next(error);
     }
   }
+
+  getCacheMetrics(_req: Request, res: Response): void {
+    const metrics = analysisService.getMetrics();
+    res.status(200).json({
+      success: true,
+      data: {
+        metrics,
+      },
+    });
+  }
+
+  async getCodeMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { sessionId } = req.params;
+      const overview = await analysisService.generateOverview(sessionId);
+      if (!overview || !overview.codeMetrics) {
+        throw createError('Code metrics unavailable for this session', 404);
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          metrics: overview.codeMetrics,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const analysisController = new AnalysisController();
